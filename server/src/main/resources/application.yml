@@ -21,6 +21,17 @@ spring:
     open-in-view: false
     properties:
       hibernate.jdbc.time_zone: UTC
+  task:
+    scheduling:
+      # 預設是 1。已經有 profile 同步、webhook 事件清理、nonce 清理三個排程工作，
+      # 派送器排在它們後面就會在每天 03:00 的 profile 同步期間完全停擺 ——
+      # 症狀是「凌晨的通知都晚了幾十分鐘」，而且只在正式環境才看得出來。
+      pool:
+        size: 3
+      shutdown:
+        await-termination: true
+        await-termination-period: 30s
+
   flyway:
     enabled: true
     locations: classpath:db/migration
@@ -65,6 +76,22 @@ app:
   # 注意：目前是 per-instance 計數，加開第二個實例前需改共享儲存。
   rate-limit:
     default-per-minute: ${APP_RATE_LIMIT_PER_MINUTE:60}
+
+  # 派送器（T8）。見 07-非同步與可靠性設計 §5。
+  dispatch:
+    # 取件間隔。這是「最壞情況的延遲」，不是常態 —— 受理當下就會直接踢一次派送。
+    poll-interval: ${APP_DISPATCH_POLL_INTERVAL:PT10S}
+    # 一次取幾批。太大會讓單一輪次佔住執行緒太久，太小會拉長大量發送的總時間。
+    batch-limit: ${APP_DISPATCH_BATCH_LIMIT:10}
+    # 租約長度：取件後把 next_attempt_at 推到這麼久之後，避免下一輪重複取到
+    # 同一批。必須明顯長於一次 LINE 呼叫的最壞耗時。
+    lease: ${APP_DISPATCH_LEASE:PT2M}
+
+  line:
+    api-base-url: ${LINE_API_BASE_URL:https://api.line.me}
+    # LINE multicast 上限是 200 req/s，只用一半 —— 另一半留給 webhook 回覆與
+    # profile 校正，它們與發送共用同一個 channel 的配額。
+    rate-limit-per-second: ${LINE_RATE_LIMIT_PER_SECOND:100}
 
   crypto:
     current-key-version: ${APP_SECRET_ENC_KEY_VERSION:1}
