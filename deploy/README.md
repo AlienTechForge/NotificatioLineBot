@@ -23,18 +23,26 @@ ss -ltnp | grep -E ':(19080|5432)\s' || echo "19080 與 5432 都沒被占用"
 | 檔案 | 位置 |
 |---|---|
 | `.env` | `APP_PORT=19080` |
-| `deploy/nginx/notify.example.com.conf` | `upstream notifyline { server 127.0.0.1:19080; }` |
+| nginx 設定 | `upstream notifyline { server 127.0.0.1:19080; }` |
 
 > PostgreSQL 容器**沒有**對主機開 port，不會跟 server 上既有的 5432 衝突。
 
 ---
 
-## 1. 取得程式碼與設定
+## 1. 建立部署目錄與設定
+
+**server 上不需要 JDK / Maven / Node，也不需要 clone 整個 repo** ——
+image 由 CI 建好推到 GHCR，server 只要 Docker。
 
 ```bash
-git clone <repo> /opt/notifyline      # 或用你習慣的路徑
-cd /opt/notifyline
-cp .env.example .env
+sudo mkdir -p /opt/notifyline && cd /opt/notifyline
+
+# compose 檔會由 CI 的 deploy job 自動送上來。
+# 手動先跑一次的話：
+curl -sSL -o docker-compose.yml   https://raw.githubusercontent.com/Alien7666/NotificatioLineBot/main/docker/docker-compose.prod.yml
+
+# .env 由你自己建立，永遠不經過 CI
+sudo nano .env
 ```
 
 編輯 `.env`：
@@ -68,16 +76,23 @@ sudo chown root:root .env && sudo chmod 600 .env
 ```
 
 > ⚠️ `APP_SECRET_ENC_KEY` **遺失就等於所有 client 憑證報廢**（無法解密，只能全部重發）。
-> 請額外備份到密碼管理器，且**不要和資料庫備份放同一個地方** ——
-> 放一起等於沒有加密。
+>
+> 它是什麼、為什麼非要不可、怎麼備份、有沒有其他選項 ——
+> 見 [金鑰管理.md](金鑰管理.md)。**部署前先讀完那份。**
 
 ---
 
 ## 2. 啟動
 
+private repo 的 image 需要先登入 GHCR（用有 `read:packages` scope 的 PAT）：
+
 ```bash
-docker compose -f docker/docker-compose.yml --env-file .env up -d --build
+echo "<你的 GitHub PAT>" | docker login ghcr.io -u Alien7666 --password-stdin
+docker compose --env-file .env up -d
 ```
+
+> 之後 CI 的 deploy job 會用短效的 `GITHUB_TOKEN` 自己登入，
+> 這一步只是手動先跑一次時需要。
 
 確認只綁在 localhost：
 

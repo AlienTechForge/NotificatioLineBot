@@ -63,6 +63,7 @@ POC 說明見 [`poc/README.md`](poc/README.md) —— **不需要真實 LINE 憑
 | 誰能發給誰、金鑰怎麼發 | [`Docs/plan/03-權限與認證設計.md`](Docs/plan/03-權限與認證設計.md) |
 | LINE 平台有哪些硬限制 | [`Docs/plan/06-LINE整合設計.md`](Docs/plan/06-LINE整合設計.md) |
 | 部署到 server | [`deploy/README.md`](deploy/README.md) |
+| **加密金鑰怎麼備份** | [`deploy/金鑰管理.md`](deploy/金鑰管理.md) |
 | 當初為什麼這樣選 | [`Docs/plan/adr/`](Docs/plan/adr/README.md) |
 | 完整索引 | [`Docs/plan/README.md`](Docs/plan/README.md) |
 
@@ -91,5 +92,6 @@ Testcontainers · Docker
 
 - **`.env` 絕不進版控**（已在 `.gitignore`）
 - **`APP_SECRET_ENC_KEY` 遺失 = 所有 client 憑證報廢**（無法解密，只能全部重發）。
-  必須額外備份，且**不可與資料庫備份放在同一個地方**
+  必須額外備份，且**不可與資料庫備份放在同一個地方** ——
+  完整說明見 [`deploy/金鑰管理.md`](deploy/金鑰管理.md)
 - Client secret **只在建立時顯示一次**，之後任何人都無法讀回
