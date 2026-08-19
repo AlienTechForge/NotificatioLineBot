@@ -57,9 +57,10 @@ POC 說明見 [`poc/README.md`](poc/README.md) —— **不需要真實 LINE 憑
 
 | 想知道什麼 | 看哪裡 |
 |---|---|
+| **我要寫一個 client 來發通知** | [`Docs/AI-接入指南.md`](Docs/AI-接入指南.md) |
 | 這專案要解決什麼、範圍到哪 | [`Docs/plan/01-PRD.md`](Docs/plan/01-PRD.md) |
 | 系統長什麼樣、用什麼版本 | [`Docs/plan/02-架構設計.md`](Docs/plan/02-架構設計.md) |
-| **怎麼呼叫這個 API** | [`Docs/plan/05-API契約.md`](Docs/plan/05-API契約.md) |
+| API 的設計理由與完整契約 | [`Docs/plan/05-API契約.md`](Docs/plan/05-API契約.md) |
 | 誰能發給誰、金鑰怎麼發 | [`Docs/plan/03-權限與認證設計.md`](Docs/plan/03-權限與認證設計.md) |
 | LINE 平台有哪些硬限制 | [`Docs/plan/06-LINE整合設計.md`](Docs/plan/06-LINE整合設計.md) |
 | 部署到 server | [`deploy/README.md`](deploy/README.md) |
