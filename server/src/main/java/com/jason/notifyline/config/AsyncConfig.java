@@ -49,19 +49,28 @@ public class AsyncConfig {
      * 出事時無法把同步段與非同步段的日誌串起來。這是最容易漏、也最容易在事故當下
      * 讓人抓狂的一個細節。
      *
-     * <p>{@code finally} 的 clear 同樣重要 —— 執行緒是重複使用的，不清會讓下一個
-     * 工作繼承錯誤的 context。
+     * <p>收尾用<strong>還原</strong>而不是 {@code MDC.clear()}。池滿時
+     * {@link ThreadPoolExecutor.CallerRunsPolicy} 會讓工作在<strong>呼叫者的
+     * HTTP 執行緒</strong>上跑，此時 clear 會把該請求自己的 requestId 一併抹掉，
+     * 導致後半段的日誌無故失去追蹤碼 —— 而且只在池滿（也就是最需要查日誌）時發生。
+     * 存下原本的 context 再還原，兩種情形都正確：非同步執行緒原本是空的，
+     * 還原等同於清空。
      */
     private static Runnable propagateMdc(Runnable task) {
         Map<String, String> context = MDC.getCopyOfContextMap();
         return () -> {
+            Map<String, String> previous = MDC.getCopyOfContextMap();
             if (context != null) {
                 MDC.setContextMap(context);
             }
             try {
                 task.run();
             } finally {
-                MDC.clear();
+                if (previous != null) {
+                    MDC.setContextMap(previous);
+                } else {
+                    MDC.clear();
+                }
             }
         };
     }

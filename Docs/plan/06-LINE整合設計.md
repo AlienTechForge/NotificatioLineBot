@@ -273,7 +273,8 @@ GET /v2/bot/message/quota/consumption  → 本月已用量
 
 1. 陣列長度 ≤ 5
 2. 每個物件有合法的 `type`
-3. **遞迴掃描所有 `uri` 欄位**，網域必須在 `app.line.allowed-uri-hosts` 白名單內
+3. **遞迴掃描每個字串葉節點**（不只 `uri` 欄位，也不只整串就是 URI 的情況），
+   其中所有 http(s) 連結的網域必須在 `app.allowed-uri-hosts` 白名單內
 
 第 3 點是安全關鍵，理由見 [缺口 G5](02-架構設計.md#g5--linemessages-逃生門的濫用風險--phase-1)。掃描必須遞迴——Flex Message 的 action 可以巢狀在很深的結構裡。
 
