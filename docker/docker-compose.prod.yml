@@ -37,7 +37,7 @@ services:
   app:
     # 由 deploy job 以環境變數指定確切的 sha tag，讓每次部署可追溯、可回滾。
     # 沒指定時退回 latest（手動操作用）。
-    image: ${NOTIFYLINE_IMAGE:-ghcr.io/alien7666/notificatiolinebot:latest}
+    image: ${NOTIFYLINE_IMAGE:-ghcr.io/alientechforge/notificatiolinebot:latest}
     container_name: notifyline-app
     env_file: .env
     depends_on:

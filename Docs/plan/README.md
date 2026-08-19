@@ -38,7 +38,7 @@ POST /api/v1/notifications
 | ALL 發送 | multicast 分批 500 人 + 非同步佇列 | [ADR-0003](adr/0003-ALL-採-multicast-而非-broadcast.md) |
 | 非同步 | DB outbox + `@Async` + redriver | [ADR-0007](adr/0007-非同步採-DB-outbox-而非訊息中介.md) |
 | Admin UI | React + Ant Design，獨立目錄，CI 時打包進 jar | [ADR-0005](adr/0005-Admin-UI-單一-repo-打包進-jar.md) |
-| CI/CD | GHCR image + SSH 部署，private repo | [ADR-0010](adr/0010-CICD-改採-GHCR-加-SSH-部署.md)（取代 [0006](adr/0006-CICD-採-self-hosted-runner.md)） |
+| CI/CD | GitHub-hosted 建 image 推 GHCR，**self-hosted runner 部署** | [ADR-0006](adr/0006-CICD-採-self-hosted-runner.md) + [ADR-0010](adr/0010-CICD-改採-GHCR-加-SSH-部署.md) |
 | 對外 Endpoint | 使用者自行配置反向代理與 HTTPS | 不在本專案範圍 |
 
 ---

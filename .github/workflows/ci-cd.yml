@@ -116,13 +116,15 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════
   #  部署到 server
   #
-  #  未設定 SSH secrets 時自動跳過（不會讓整個 workflow 紅燈）。
-  #  需要的 secrets：DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY
-  #  選用 variable：DEPLOY_PORT（非 22 時）、DEPLOY_PATH（預設 /opt/notifyline）
+  #  跑在組織層級的 self-hosted runner（alien-server）上 ——
+  #  它「就在」那台 server，所以不需要 SSH 金鑰、不需要對外開 22 port，
+  #  也不需要把任何憑證放進 GitHub Secrets。
+  #
+  #  前提：repo 必須在 AlienTechForge 組織下（org 層級的 runner 只服務組織內的 repo）。
   # ═══════════════════════════════════════════════════════════════════
   deploy:
     name: Deploy
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     needs: image
     if: github.ref == 'refs/heads/main'
     # 部署不可中途被取消 —— 取消到一半比讓它跑完更危險
@@ -130,118 +132,88 @@ jobs:
       group: deploy-prod
       cancel-in-progress: false
     env:
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/notifyline' }}
       IMAGE_REF: ${{ needs.image.outputs.image_ref }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check deploy secrets
-        id: gate
-        run: |
-          if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ] || [ -z "$DEPLOY_SSH_KEY" ]; then
-            {
-              echo "### 部署已跳過"
-              echo ""
-              echo "缺少 SSH secrets。image 已推上 GHCR："
-              echo ""
-              echo '```'
-              echo "$IMAGE_REF"
-              echo '```'
-              echo ""
-              echo "要啟用自動部署，設定 \`DEPLOY_HOST\` / \`DEPLOY_USER\` / \`DEPLOY_SSH_KEY\`。"
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set up SSH
-        if: steps.gate.outputs.ok == 'true'
+      - name: 檢查部署目錄與 .env
         run: |
           set -euo pipefail
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-
-      - name: Upload compose file
-        if: steps.gate.outputs.ok == 'true'
-        run: |
-          set -euo pipefail
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "mkdir -p '$DEPLOY_PATH'"
-          scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" \
-            docker/docker-compose.prod.yml \
-            "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/docker-compose.yml"
-
-      - name: Deploy
-        if: steps.gate.outputs.ok == 'true'
-        run: |
-          set -euo pipefail
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            IMAGE_REF="$IMAGE_REF" \
-            DEPLOY_PATH="$DEPLOY_PATH" \
-            GHCR_USER="${{ github.actor }}" \
-            GHCR_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
-            'bash -seu' <<'REMOTE'
-            cd "$DEPLOY_PATH"
-
-            # .env 由 server 端管理，不經 CI —— 機密不落在 runner 上
-            [ -f .env ] || { echo "::error::$DEPLOY_PATH/.env 不存在，請先在 server 上建立"; exit 1; }
-
-            # 記下目前版本供回滾
-            PREV=$(docker inspect --format='{{.Config.Image}}' notifyline-app 2>/dev/null || echo "")
-            echo "目前版本: ${PREV:-（無）}"
-            echo "目標版本: $IMAGE_REF"
-
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-
-            export NOTIFYLINE_IMAGE="$IMAGE_REF"
-            docker compose --env-file .env pull app
-            docker compose --env-file .env up -d
-
-            # 讀 APP_PORT 做健康檢查
-            APP_PORT=$(grep -E '^APP_PORT=' .env | cut -d= -f2 | tr -d ' \r' || true)
-            APP_PORT="${APP_PORT:-19080}"
-
-            echo "等待健康檢查（最多 180 秒）..."
-            for i in $(seq 1 90); do
-              if curl -fsS "http://127.0.0.1:${APP_PORT}/actuator/health" | grep -q '"status":"UP"'; then
-                echo "健康檢查通過（$((i * 2)) 秒）"
-                docker logout ghcr.io >/dev/null 2>&1 || true
-                exit 0
-              fi
-              sleep 2
-            done
-
-            echo "::error::健康檢查失敗，回滾中"
-            docker compose --env-file .env logs --tail=60 app || true
-            if [ -n "$PREV" ]; then
-              export NOTIFYLINE_IMAGE="$PREV"
-              docker compose --env-file .env up -d
-              echo "已回滾到 $PREV"
-            fi
-            docker logout ghcr.io >/dev/null 2>&1 || true
+          if [ ! -d "$DEPLOY_PATH" ]; then
+            echo "::error::$DEPLOY_PATH 不存在。先在 server 上執行 deploy/server-setup.sh"
             exit 1
-          REMOTE
+          fi
+          if [ ! -f "$DEPLOY_PATH/.env" ]; then
+            echo "::error::$DEPLOY_PATH/.env 不存在。機密由 server 端管理，不經 CI"
+            exit 1
+          fi
+          echo "部署目錄與 .env 就緒"
 
-      - name: Cleanup
+      - name: 更新 compose 檔
+        run: cp docker/docker-compose.prod.yml "$DEPLOY_PATH/docker-compose.yml"
+
+      - name: 拉取並啟動
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+
+          # 記下目前版本供回滾
+          PREV=$(docker inspect --format='{{.Config.Image}}' notifyline-app 2>/dev/null || echo "")
+          echo "目前版本: ${PREV:-（無）}"
+          echo "目標版本: $IMAGE_REF"
+          echo "PREV_IMAGE=$PREV" >> "$GITHUB_ENV"
+
+          # private package 需要登入。GITHUB_TOKEN 是短效的，用完就登出。
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+          export NOTIFYLINE_IMAGE="$IMAGE_REF"
+          docker compose --env-file .env pull app
+          docker compose --env-file .env up -d
+
+      - name: 健康檢查
+        id: health
+        run: |
+          set -uo pipefail
+          cd "$DEPLOY_PATH"
+          APP_PORT=$(grep -E '^APP_PORT=' .env | cut -d= -f2 | tr -d ' \r' || true)
+          APP_PORT="${APP_PORT:-19080}"
+
+          for i in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:${APP_PORT}/actuator/health" | grep -q '"status":"UP"'; then
+              echo "健康檢查通過（$((i * 2)) 秒）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::180 秒內未通過健康檢查"
+          docker compose --env-file .env logs --tail=60 app || true
+          exit 1
+
+      - name: 回滾
+        if: failure() && steps.health.outcome == 'failure' && env.PREV_IMAGE != ''
+        run: |
+          cd "$DEPLOY_PATH"
+          export NOTIFYLINE_IMAGE="$PREV_IMAGE"
+          docker compose --env-file .env up -d
+          echo "::warning::已回滾到 $PREV_IMAGE"
+
+      - name: 登出 GHCR
         if: always()
-        run: rm -f ~/.ssh/deploy_key
+        run: docker logout ghcr.io || true
 
       - name: Summary
-        if: steps.gate.outputs.ok == 'true' && success()
+        if: success()
         run: |
+          cd "$DEPLOY_PATH"
+          APP_PORT=$(grep -E '^APP_PORT=' .env | cut -d= -f2 | tr -d ' \r' || echo 19080)
           {
             echo "### 部署成功"
             echo ""
             echo "| | |"
             echo "|---|---|"
             echo "| Image | \`$IMAGE_REF\` |"
-            echo "| Host | \`$DEPLOY_HOST\` |"
-            echo "| Path | \`$DEPLOY_PATH\` |"
+            echo "| 部署路徑 | \`$DEPLOY_PATH\` |"
+            echo "| 本機健康檢查 | \`http://127.0.0.1:$APP_PORT/actuator/health\` |"
+            echo "| 對外 | https://notif.azndev.com/actuator/health |"
           } >> "$GITHUB_STEP_SUMMARY"

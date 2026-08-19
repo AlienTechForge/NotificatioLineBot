@@ -1,10 +1,10 @@
 # ADR-0006 — CI/CD 採 self-hosted runner
 
-**狀態**：**Superseded by [ADR-0010](0010-CICD-改採-GHCR-加-SSH-部署.md)** ｜ 2026-08-18（2026-08-19 取代）
+**狀態**：Accepted ｜ 2026-08-18（2026-08-19 由 [ADR-0010](0010-CICD-改採-GHCR-加-SSH-部署.md) 補充 image 建置方式）
 
-> ⚠️ 本決策已被取代。實際採用的是 GHCR + SSH 部署，理由見 ADR-0010。
-> 本文保留作為當初的判斷紀錄 —— 下方分析的 self-hosted runner 風險項目仍然成立，
-> 只是最後選擇不承擔它們。
+> 本決策**仍然有效**。2026-08-19 曾一度被錯誤地標記為 Superseded —— 見 ADR-0010 的說明。
+> 實際採用的是「GitHub-hosted 建 image + self-hosted runner 部署」的組合，
+> 部署端仍是 self-hosted runner。
 
 ## 背景
 
@@ -87,8 +87,7 @@ GitHub Actions 要把產物送上 server，主要有四種做法：
 | 其他 repo 的 workflow 誤跑到這台 | 專用 label `[self-hosted, linux, notifyline]` |
 | 併發部署造成容器狀態錯亂 | `concurrency: { group: deploy-prod, cancel-in-progress: false }` |
 
-（本決策已被 [ADR-0010](0010-CICD-改採-GHCR-加-SSH-部署.md) 取代，上述措施不再適用；
-其中「repo 保持 private」與「最小化 workflow permissions」兩條在新方案下依然成立。）
+完整清單見 [09-CICD與維運 §3](../09-CICD與維運.md#3-安全前提)。**這些不是建議，是本決策成立的前提。**
 
 **未解決的限制**
 

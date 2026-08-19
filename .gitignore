@@ -35,3 +35,8 @@ desktop.ini
 
 # ── 其他 ──────────────────────────────────────────
 *.log
+
+# ── 部署產物（含機密，絕不進版控）────────────────
+deploy/.deploy_key
+deploy/.deploy_key.pub
+deploy/server-setup.sh

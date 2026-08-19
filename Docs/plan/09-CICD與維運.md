@@ -8,16 +8,20 @@
 
 ## 1. 部署架構
 
-見 [ADR-0010](adr/0010-CICD-改採-GHCR-加-SSH-部署.md)。全部 job 跑在 GitHub-hosted runner。
+見 [ADR-0006](adr/0006-CICD-採-self-hosted-runner.md) 與
+[ADR-0010](adr/0010-CICD-改採-GHCR-加-SSH-部署.md)。**兩種 runner 分工**。
 
 ```text
 push main
    │
    ▼
-GitHub Actions（ubuntu-latest）
+GitHub-hosted（ubuntu-latest）
    ├── test    mvn verify（Testcontainers 自備 PostgreSQL + 覆蓋率門檻）
-   ├── image   build → 推 GHCR，打 sha-<短碼> tag
-   └── deploy  SSH → docker compose pull + up -d + 健康檢查 + 失敗回滾
+   └── image   build → 推 GHCR，打 sha-<短碼> tag
+                     │
+                     ▼
+self-hosted runner「alien-server」（就在那台 server 上）
+   └── deploy  docker compose pull + up -d + 健康檢查 + 失敗回滾
                      │
                      ▼
               Server（notif.azndev.com）
@@ -26,9 +30,13 @@ GitHub Actions（ubuntu-latest）
                 └── postgres 容器
 ```
 
-**機密永遠不進 GitHub**：`.env` 由 server 端 root 管理（`chmod 600`），
-deploy job 只送 `docker-compose.yml`。job 若發現 `.env` 不存在會直接失敗並明講，
-不會用預設值硬跑。
+**部署端用 self-hosted runner 的關鍵好處**：runner 就在 server 上，所以
+**不需要 SSH 金鑰、不需要對外開 22 port、機密完全不進 GitHub**。
+`.env` 由 server 端管理（`chmod 600`），deploy job 只複製 `docker-compose.yml`。
+job 若發現 `.env` 不存在會直接失敗並明講，不會用預設值硬跑。
+
+> ⚠️ **repo 必須留在 AlienTechForge 組織下** —— 組織層級的 runner 只服務組織內的 repo。
+> 轉出組織就會失去部署能力。
 
 ## 2. Workflow
 
@@ -72,66 +80,52 @@ PR 完全不接觸正式環境。
 
 ### 2.3 `deploy`
 
-`needs: image`，且 `if: github.ref == 'refs/heads/main'`。
+`needs: image`，`if: github.ref == 'refs/heads/main'`，
+`runs-on: [self-hosted, Linux, X64]`。
 
 ```text
-1. 檢查 SSH secrets 是否齊全 -> 缺就「跳過」而非失敗
-2. 寫入部署金鑰、ssh-keyscan 目標主機
-3. scp docker-compose.prod.yml -> $DEPLOY_PATH/docker-compose.yml
-4. SSH 進去：
-     確認 .env 存在（不存在直接失敗）
-     docker inspect 記下目前的 image（供回滾）
-     docker login ghcr.io（用 GITHUB_TOKEN，短效）
-     NOTIFYLINE_IMAGE=<sha tag> docker compose pull && up -d
-     輪詢 /actuator/health 最多 180 秒
-     失敗 -> 印出日誌 + 用記下的舊 image 回滾
-     docker logout
-5. always: 刪除 runner 上的部署金鑰
+1. 檢查 $DEPLOY_PATH 與 .env 存在 -> 不存在直接失敗並說明
+2. 複製 docker-compose.prod.yml -> $DEPLOY_PATH/docker-compose.yml
+3. docker inspect 記下目前 image（供回滾）
+4. docker login ghcr.io（短效 GITHUB_TOKEN）
+5. NOTIFYLINE_IMAGE=<sha tag> docker compose pull && up -d
+6. 輪詢 127.0.0.1:$APP_PORT/actuator/health 最多 180 秒
+7. 失敗 -> 印日誌 + 用記下的舊 image 回滾
+8. always: docker logout
 ```
 
-**用 `sha-<短碼>` 而非 `latest` 部署**：`latest` 是浮動的，「現在跑的是哪一版」無法回答，
-回滾也沒有明確目標。
+**沒有 SSH 步驟** —— runner 本來就在那台機器上。
 
 `concurrency: { group: deploy-prod, cancel-in-progress: false }` ——
 **取消部署到一半比讓它跑完更危險**。
 
-**缺 secrets 時跳過而非失敗**：讓「先把 image 推上去、之後再接部署」是一條合法路徑，
-不會每次 push 都看到紅燈。
 
-## 3. 需要設定的 Secrets / Variables
+## 3. 安全前提
 
-`Settings` → `Secrets and variables` → `Actions`
+### 需要設定的 Variables
 
-| 名稱 | 類型 | 必要性 | 說明 |
-|---|---|---|---|
-| `GITHUB_TOKEN` | 內建 | 自動 | 推 GHCR 用，免設 |
-| `DEPLOY_HOST` | secret | deploy 才需 | server 位址 |
-| `DEPLOY_USER` | secret | deploy 才需 | SSH 帳號 |
-| `DEPLOY_SSH_KEY` | secret | deploy 才需 | **專用部署私鑰全文**，不要用個人日常金鑰 |
-| `DEPLOY_PORT` | variable | 非 22 才需 | SSH port |
-| `DEPLOY_PATH` | variable | 選用 | 預設 `/opt/notifyline` |
+| 名稱 | 類型 | 說明 |
+|---|---|---|
+| `GITHUB_TOKEN` | 內建 | 推 GHCR 與 runner 端 `docker login` 用，免設 |
+| `DEPLOY_PATH` | variable | 預設 `/opt/notifyline` |
 
-一次性的 repo 設定：
+**不需要任何 SSH secret** —— 這是 self-hosted 部署相對 SSH 部署的主要好處。
 
+### 一次性的 repo 設定
+
+- repo 必須在 **AlienTechForge** 組織下
 - `Settings` → `Actions` → `General` → Workflow permissions = **Read and write**
-  （讓內建 `GITHUB_TOKEN` 能推 GHCR）
-- 首次 push 成功後，`Packages` → 該 package → `Manage Actions access` → 連結 repo
+- Actions runner group 需允許此 repo 使用 `alien-server`
 
-### 安全前提
+### 必須遵守
 
 | 措施 | 為什麼 |
 |---|---|
-| **Repo 保持 private** | 這條與 ADR-0006 時期一樣重要 |
-| `permissions: contents: read` + `packages: write` | 不給多餘權限 |
+| **Repo 保持 private** | runner 會在 server 上執行 repo 中的程式碼。GitHub 官方明確不建議 public repo 用 self-hosted runner —— 任何人發 fork PR 就能在你的機器上執行任意程式碼 |
 | **禁用 `pull_request_target`** | 該事件會帶著 repo secrets 執行 PR 的程式碼 |
-| **專用部署金鑰**，非個人日常金鑰 | 外洩時影響範圍可控 |
-| 在 server 上限制該金鑰可執行的操作 | `authorized_keys` 的 `command=` 限制，或用專用低權限帳號 |
-| deploy job 只在 `main` 觸發 | PR 碰不到部署路徑 |
-
-> ⚠️ **相對 self-hosted runner 變差的一點**：多了一把能登入 server 的私鑰放在
-> GitHub Secrets。若這個風險不可接受，改用 Watchtower —— 完全不需要
-> GitHub → server 的憑證，代價是部署時間不可控且無法自動回滾。
-> 完整取捨見 [ADR-0010](adr/0010-CICD-改採-GHCR-加-SSH-部署.md)。
+| `permissions: contents: read` + `packages: write` | 不給多餘權限 |
+| PR **不觸發** deploy job | `if: github.ref == 'refs/heads/main'` |
+| build 不在 self-hosted 上跑 | PR 的程式碼只在 GitHub-hosted 執行，不碰 server |
 
 
 ## 4. Docker
