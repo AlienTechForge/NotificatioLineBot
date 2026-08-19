@@ -1,0 +1,58 @@
+# =====================================================================
+#  本設定僅支援「單一 app 實例」。
+#
+#  加開第二個實例前必須先處理：
+#    - 缺口 G12：@Scheduled 在多實例會重複執行（需 ShedLock）
+#    - 07 §11：RateLimitFilter 目前是 per-instance 計數
+#
+#  用法：
+#    cp .env.example .env   （在 repo 根目錄，填入實際值）
+#    docker compose -f docker/docker-compose.yml up -d
+# =====================================================================
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: notifyline-postgres
+    environment:
+      POSTGRES_DB: notifyline
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      # PostgreSQL 18+ 要求掛在 /var/lib/postgresql（不是 .../data）。
+      # 映像會自己在底下建 major-version 專屬子目錄，讓日後 pg_upgrade --link
+      # 不會跨掛載點。掛成舊路徑會直接讓容器啟動失敗。
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d notifyline"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        WITH_ADMIN_UI: "false"      # Phase 2 改 true
+        GIT_SHA: ${GIT_SHA:-local}
+    container_name: notifyline-app
+    env_file: ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # 只綁 127.0.0.1 —— 應用不直接對外，一律經同機的 nginx 反向代理。
+      # 容器內固定 8080，對外的主機 port 由 APP_PORT 決定（8080 常被占用）。
+      - "127.0.0.1:${APP_PORT:-19080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  pgdata:

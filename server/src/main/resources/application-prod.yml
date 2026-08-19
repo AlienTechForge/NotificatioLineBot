@@ -1,0 +1,19 @@
+# 正式環境。所有機密一律由 .env 注入，無預設值 —— 缺少就該啟動失敗。
+spring:
+  jpa:
+    show-sql: false
+  flyway:
+    # 正式環境不允許 schema 漂移：checksum 不符就拒絕啟動。
+    validate-on-migrate: true
+    clean-disabled: true
+
+management:
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    root: INFO
+    com.jason.notifyline: INFO
+    org.springframework.web: WARN

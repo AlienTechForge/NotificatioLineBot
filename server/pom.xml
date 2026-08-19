@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.0</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.jason</groupId>
+    <artifactId>notifyline-server</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <name>notifyline-server</name>
+    <description>Unified LINE Notification Service</description>
+
+    <properties>
+        <java.version>21</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!--
+          Spring Boot 4.1.0 的 BOM 同時管理兩套 Jackson：
+            com.fasterxml.jackson:jackson-bom  -> 2.21.4   (jackson-2-bom.version)
+            tools.jackson:jackson-bom          -> 3.1.4    (jackson-bom.version)
+
+          但 line-bot-jackson:10.1.0 依賴 jackson-databind:2.22.0，
+          而 BOM 的版本管理會壓過 transitive 版本，把它降成 2.21.4。
+
+          兩套 Jackson 是不同 groupId 與 package，可以共存 —— LINE SDK 走
+          retrofit + 自己的 ObjectMapper，Spring MVC 走 Jackson 3，互不干擾。
+          所以正確做法是「對齊 Jackson 2 版本」而非排除任何一方。
+
+          詳見 Docs/plan/adr/0008-鎖定-Spring-Boot-4.1-並覆寫-Jackson-2-版本.md
+          驗證：mvn dependency:tree | grep -i jackson
+        -->
+        <jackson-2-bom.version>2.22.0</jackson-2-bom.version>
+
+        <line-bot-sdk.version>10.1.0</line-bot-sdk.version>
+        <!-- Spring Boot 4 要用 -spring-boot4 變體，不是 -spring-boot3 -->
+        <resilience4j.version>2.4.0</resilience4j.version>
+        <!-- okhttp 5 的 MockWebServer 已改到 mockwebserver3 座標 -->
+        <mockwebserver.version>5.5.0</mockwebserver.version>
+        <jacoco.version>0.8.13</jacoco.version>
+    </properties>
+
+    <dependencies>
+        <!-- ── Web / 持久層 / 安全 ───────────────────────────────── -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- ── LINE Messaging API ────────────────────────────────── -->
+        <dependency>
+            <groupId>com.linecorp.bot</groupId>
+            <artifactId>line-bot-spring-boot-webmvc</artifactId>
+            <version>${line-bot-sdk.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.linecorp.bot</groupId>
+            <artifactId>line-bot-spring-boot-client</artifactId>
+            <version>${line-bot-sdk.version}</version>
+        </dependency>
+        <!--
+          必須顯式宣告。上游 README 寫「You don't need to depend on this
+          explicitly」，但 10.1.0 的 line-bot-spring-boot-web POM 完全沒有
+          引用 handler，所以 @LineMessageHandler / @EventMapping 這兩個
+          註解不會出現在編譯類路徑上。
+          驗證：mvn dependency:tree | grep linecorp
+        -->
+        <dependency>
+            <groupId>com.linecorp.bot</groupId>
+            <artifactId>line-bot-spring-boot-handler</artifactId>
+            <version>${line-bot-sdk.version}</version>
+        </dependency>
+
+        <!-- ── 資料庫 ─────────────────────────────────────────────── -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <!--
+          Spring Boot 4 把 autoconfiguration 從單一的 spring-boot-autoconfigure
+          拆成一堆技術別模組（spring-boot-flyway / -jpa / -security / ...）。
+          FlywayAutoConfiguration 現在住在 spring-boot-flyway，
+          光有 flyway-core 不會啟動 migration —— 應用會正常啟動但一張表都沒有。
+
+          症狀：啟動日誌完全沒有 Flyway 相關訊息，資料庫是空的。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- ── 韌性 / 快取 / 指標 ─────────────────────────────────── -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot4</artifactId>
+            <version>${resilience4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- ── 測試 ───────────────────────────────────────────────── -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+          Spring Boot 4 把 MockMvc 的測試 auto-configuration 拆到獨立模組。
+          @AutoConfigureMockMvc 從 org.springframework.boot.test.autoconfigure.web.servlet
+          搬到 org.springframework.boot.webmvc.test.autoconfigure，
+          spring-boot-starter-test 不再含它。（同 T1 F2 的模組拆分）
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Testcontainers 2.x 改了座標：postgresql -> testcontainers-postgresql -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- LINE API 打樁。絕不在測試中呼叫真實 LINE API。 -->
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>mockwebserver3-junit5</artifactId>
+            <version>${mockwebserver.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <!--
+              測試分兩層：
+                surefire  -> *Test  單元測試，純記憶體，毫秒級。TDD 迴圈跑這個。
+                failsafe  -> *IT    整合測試，Testcontainers 起真的 PostgreSQL，數十秒。
+
+              `mvn test` 只跑單元測試，`mvn verify` 兩者都跑。
+              分開的理由是 TDD 迴圈不該每次都等容器啟動。
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <executions>
+                    <execution>
+                        <goals><goal>prepare-agent</goal></goals>
+                    </execution>
+                    <!--
+                      整合測試的覆蓋率累加進「同一個」exec 檔，讓門檻看到的是
+                      單元 + 整合的合計。jacoco agent 預設就是 append 模式。
+                    -->
+                    <execution>
+                        <id>prepare-agent-integration</id>
+                        <goals><goal>prepare-agent-integration</goal></goals>
+                        <configuration>
+                            <destFile>${project.build.directory}/jacoco.exec</destFile>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals><goal>report</goal></goals>
+                    </execution>
+                    <!--
+                      覆蓋率門檻。見 Docs/plan/08-測試計畫.md §6。
+                      excludes 只掛在 check 上，report 仍完整顯示所有類別。
+                    -->
+                    <execution>
+                        <id>check</id>
+                        <phase>verify</phase>
+                        <goals><goal>check</goal></goals>
+                        <configuration>
+                            <excludes>
+                                <!-- main() + @SpringBootApplication，沒有可測的行為 -->
+                                <exclude>**/NotifyLineApplication.class</exclude>
+                                <!--
+                                  宣告式的 bean 設定，行為只在 HTTP 層可觀察。
+                                  TODO(T4)：整合測試涵蓋路徑分流後移除這行排除。
+                                -->
+                                <exclude>**/config/SecurityConfig.class</exclude>
+                            </excludes>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.80</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                                <!--
+                                  安全關鍵。剩下未覆蓋的都是 JDK 必備演算法的
+                                  catch block（SHA-256 / HmacSHA256 / AES-GCM），
+                                  實務上不可達，所以 95% 已是實際上限附近。
+                                -->
+                                <rule>
+                                    <element>PACKAGE</element>
+                                    <includes>
+                                        <include>com.jason.notifyline.auth</include>
+                                    </includes>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.95</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                                <!-- 可靠性關鍵。T8 建立此套件後生效 -->
+                                <rule>
+                                    <element>PACKAGE</element>
+                                    <includes>
+                                        <include>com.jason.notifyline.notification.dispatch</include>
+                                    </includes>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.90</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

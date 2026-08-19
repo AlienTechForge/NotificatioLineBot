@@ -1,0 +1,97 @@
+# 共用設定。環境專屬覆寫見 application-dev.yml / application-prod.yml。
+spring:
+  application:
+    name: notifyline
+  autoconfigure:
+    exclude:
+      # 認證走 HMAC（T4 的 HmacAuthFilter），不使用 Spring Security 的
+      # UserDetailsService。留著它只會在每次啟動印出一組沒人用的隨機密碼。
+      - org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 10
+      connection-timeout: 5000
+  jpa:
+    # schema 一律由 Flyway 管。啟動時比對 entity 與實際 schema，不一致就拒絕啟動。
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate.jdbc.time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    validate-on-migrate: true
+
+server:
+  port: 8080
+  # 反向代理後方才能取得正確的 scheme/host。缺這行，產生的絕對 URL
+  # 會變成容器內的 http://localhost:8080。
+  forward-headers-strategy: framework
+  shutdown: graceful
+  error:
+    # 錯誤回應不得外洩 stack trace、SQL 或內部訊息。
+    include-message: never
+    include-stacktrace: never
+    include-binding-errors: never
+    include-exception: false
+
+line:
+  bot:
+    channel-token: ${LINE_CHANNEL_TOKEN}
+    channel-secret: ${LINE_CHANNEL_SECRET}
+    handler:
+      # SDK 預設是 /callback，改成專案自己的路徑。
+      # 這條路徑用 LINE 自己的 x-line-signature 驗簽，
+      # 必須排除在我們對呼叫端的 HMAC filter 之外。
+      path: /line/webhook
+
+app:
+  public-base-url: ${APP_PUBLIC_BASE_URL:http://localhost:8080}
+  owner-line-user-id: ${APP_OWNER_LINE_USER_ID:}
+  allowed-uri-hosts: ${APP_ALLOWED_URI_HOSTS:}
+
+  # Client secret 的加密金鑰。見 ADR-0002。
+  # HMAC 驗簽需要伺服器重算簽章，所以 secret 只能加密不能雜湊 ——
+  # 這把 key 保護所有憑證，遺失就等於所有金鑰報廢。
+  #
+  # 多版本並存是為了不停機輪替：新資料用 current-key-version 加密，
+  # 舊資料仍以各自的版本解密。輪替程序見 09-CICD與維運 §7.1。
+  # 空字串會被忽略，所以非輪替期間 V2 可以留著不填。
+  # 呼叫端速率限制（缺口 G2）。client.rate_limit_per_min 可個別覆寫。
+  # 注意：目前是 per-instance 計數，加開第二個實例前需改共享儲存。
+  rate-limit:
+    default-per-minute: ${APP_RATE_LIMIT_PER_MINUTE:60}
+
+  crypto:
+    current-key-version: ${APP_SECRET_ENC_KEY_VERSION:1}
+    keys:
+      "1": ${APP_SECRET_ENC_KEY:}
+      "2": ${APP_SECRET_ENC_KEY_V2:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+logging:
+  pattern:
+    # requestId 由 T4 的 RequestIdFilter 放入 MDC；在那之前會是空的。
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{requestId:-}] %logger{36} - %msg%n"
+  level:
+    root: INFO
+    com.jason.notifyline: INFO

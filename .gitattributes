@@ -1,0 +1,11 @@
+# 統一換行，避免 Windows 開發 + Linux 容器/CI 的 CRLF 問題。
+# 特別重要：Dockerfile 與 shell script 帶 CRLF 會在容器內直接執行失敗。
+* text=auto eol=lf
+
+# 二進位
+*.jar   binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
