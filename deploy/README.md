@@ -39,7 +39,7 @@ sudo mkdir -p /opt/notifyline && cd /opt/notifyline
 
 # compose 檔會由 CI 的 deploy job 自動送上來。
 # 手動先跑一次的話：
-curl -sSL -o docker-compose.yml   https://raw.githubusercontent.com/Alien7666/NotificatioLineBot/main/docker/docker-compose.prod.yml
+curl -sSL -o docker-compose.yml   https://raw.githubusercontent.com/AlienTechForge/NotificatioLineBot/main/docker/docker-compose.prod.yml
 
 # .env 由你自己建立，永遠不經過 CI
 sudo nano .env
@@ -84,15 +84,15 @@ sudo chown root:root .env && sudo chmod 600 .env
 
 ## 2. 啟動
 
-private repo 的 image 需要先登入 GHCR（用有 `read:packages` scope 的 PAT）：
+**正常情況下你不用手動跑這步** —— CI 的 deploy job 會在 self-hosted runner
+（也就是這台 server）上自己完成登入、拉取、啟動。
+
+要手動先跑一次的話，需要有 `read:packages` scope 的 PAT：
 
 ```bash
-echo "<你的 GitHub PAT>" | docker login ghcr.io -u Alien7666 --password-stdin
+echo "<你的 GitHub PAT>" | docker login ghcr.io -u <你的帳號> --password-stdin
 docker compose --env-file .env up -d
 ```
-
-> 之後 CI 的 deploy job 會用短效的 `GITHUB_TOKEN` 自己登入，
-> 這一步只是手動先跑一次時需要。
 
 確認只綁在 localhost：
 
