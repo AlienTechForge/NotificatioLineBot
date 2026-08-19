@@ -1,12 +1,52 @@
 # 部署到 server（notify.example.com）
 
-現況：DNS 已指向 server 並走 Cloudflare proxy，TLS 正常。
-但 `https://notify.example.com/*` 目前**任何路徑**都回同一個 200 HTML 佔位頁
-（含 `/nonexistent-xyz`），代表 nginx 還沒把流量導到我們的 app。
+**部署已全自動化。** push 到 `main` 就會：
 
-> ⚠️ 這個狀態很危險：LINE Console 的「Verify」只檢查是否回 200，
-> **現在按下去會顯示成功，但事件根本沒進到我們的 app**。
-> 一定要用下面 §5 的方式實際驗證，不要只信 Verify 的綠勾。
+```
+GitHub-hosted          self-hosted runner「alien-server」
+  test   mvn verify  →  deploy  建目錄 → 產生 .env → pull image
+  image  推 GHCR              → up -d → 健康檢查 → 失敗自動回滾
+```
+
+不需要 SSH 金鑰、不需要對外開 22 port、不需要手動登入 server。
+runner 就在那台機器上。設計理由見
+[ADR-0006](../Docs/plan/adr/0006-CICD-採-self-hosted-runner.md) 與
+[ADR-0010](../Docs/plan/adr/0010-CICD-改採-GHCR-加-SSH-部署.md)。
+
+## 前提
+
+| 項目 | 狀態 |
+|---|---|
+| repo 在 **AlienTechForge** 組織下 | ✅ 組織層級 runner 只服務組織內的 repo |
+| runner `alien-server` online | ✅ labels `[self-hosted, Linux, X64]` |
+| runner 使用者可用 docker | ✅ |
+| GitHub Secrets / Variables | ✅ 見下表 |
+| nginx 反向代理 | ✅ `deploy/nginx/notify.example.com.conf` |
+
+### Secrets（機密，值不可見）
+
+| 名稱 | 用途 |
+|---|---|
+| `LINE_CHANNEL_TOKEN` | 發訊息 |
+| `LINE_CHANNEL_SECRET` | webhook 驗簽 |
+| `APP_SECRET_ENC_KEY` | 加密所有 client secret —— **務必另外備份**，見 [金鑰管理.md](金鑰管理.md) |
+| `DB_PASSWORD` | PostgreSQL |
+
+### Variables（非機密）
+
+| 名稱 | 值 |
+|---|---|
+| `APP_PUBLIC_BASE_URL` | `https://notify.example.com` |
+| `APP_ALLOWED_URI_HOSTS` | `example.com` |
+| `APP_PORT` | `19080` |
+| `DEPLOY_PATH` | 未設 → 預設 runner 家目錄下的 `notifyline/` |
+| `APP_OWNER_LINE_USER_ID` | 待設（加好友後傳「我的ID」取得） |
+
+> `.env` 由 deploy job 從上表產生，**單一真相來源**。
+> 輪替機密只要改 Secret 再重跑一次部署，不必登入 server。
+>
+> 若要改回「`.env` 只在 server 上、CI 完全碰不到」，把 workflow 的
+> 「產生 .env」步驟換成「檢查 .env 是否存在」即可，其餘不動。
 
 ---
 
