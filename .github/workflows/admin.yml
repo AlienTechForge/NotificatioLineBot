@@ -32,6 +32,8 @@ on:
 
 permissions:
   contents: read
+  # 取用維運指令要跑的 image 需要讀 GHCR
+  packages: read
 
 concurrency:
   # 與部署互斥 —— 不要在容器重啟到一半時操作資料庫
@@ -51,6 +53,30 @@ jobs:
           TARGET="${DEPLOY_PATH_OVERRIDE:-$HOME/notifyline}"
           [ -f "$TARGET/.env" ] || { echo "::error::$TARGET/.env 不存在，請先部署一次"; exit 1; }
           echo "DEPLOY_PATH=$TARGET" >> "$GITHUB_ENV"
+
+      # 維運指令必須跑在「正在服務的那個 build」上。
+      #
+      # 少了這步，docker compose 會退回 compose 檔的預設值 :latest，而部署推的是
+      # sha-<commit> tag —— 本機根本沒有 latest，於是去 GHCR 拉，又因為沒登入而
+      # 得到 unauthorized。就算拉得到也是錯的：維運指令會跑在與線上不同的版本上。
+      - name: 解析執行用 image
+        run: |
+          set -euo pipefail
+          RUNNING=$(docker inspect --format='{{.Config.Image}}' notifyline-app 2>/dev/null || true)
+          if [ -z "$RUNNING" ]; then
+            echo "::error::找不到執行中的 notifyline-app 容器，請先部署一次"
+            exit 1
+          fi
+          echo "使用 image：$RUNNING"
+          echo "NOTIFYLINE_IMAGE=$RUNNING" >> "$GITHUB_ENV"
+
+      - name: 登入 GHCR
+        if: startsWith(inputs.action, 'create-')
+        run: |
+          set -euo pipefail
+          # 正常情況 image 已在本機（正在跑），不會真的拉。
+          # 這步是為了「image 被 docker prune 掉」那種情形。
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
 
       # ── status ──────────────────────────────────────────────────────
       - name: 服務狀態
