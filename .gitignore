@@ -40,3 +40,6 @@ desktop.ini
 deploy/.deploy_key
 deploy/.deploy_key.pub
 deploy/server-setup.sh
+
+# nginx 管理介面門禁密鑰（server-only，勿進版控）
+deploy/nginx/admin-gate.map

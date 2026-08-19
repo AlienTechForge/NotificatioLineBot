@@ -1,0 +1,20 @@
+# =====================================================================
+#  管理介面門禁 map — 範本
+#
+#  複製到 server：  /etc/nginx/conf.d/admin-gate.map
+#  權限：           sudo chown root:root，sudo chmod 640
+#  這個檔「不進版控」，因為它含真正的密鑰。
+#
+#  搭配 Cloudflare Transform Rule：
+#    Rules → Transform Rules → Modify Request Header → Create
+#      When:  URI Path  starts with  /admin
+#      Then:  Set static  X-Admin-Gate = <與下面同一串隨機值>
+#
+#  產生密鑰：  openssl rand -hex 24
+#  輪替：改 Cloudflare 與這個檔兩處，然後 sudo systemctl reload nginx
+# =====================================================================
+
+map $http_x_admin_gate $admin_denied {
+    default                                        1;
+    "CHANGE_ME_openssl_rand_hex_24_的輸出貼這裡"    0;
+}
