@@ -1,0 +1,164 @@
+name: Admin
+
+# 在 server 上執行一次性的維運指令。
+#
+# 跑在 self-hosted runner 上，所以能直接操作正式環境的容器與資料庫。
+# 只能手動觸發（workflow_dispatch），不會因為 push 而執行。
+#
+# ⚠️ 這個 workflow 能建立憑證與讀取資料庫。與部署共用同一台 runner，
+#    所以「repo 保持 private」同樣是它的安全前提。
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 要執行的動作
+        required: true
+        type: choice
+        options:
+          - status                # 看服務狀態與統計
+          - create-owner-client   # 建立 OWNER 憑證
+          - create-service-client # 建立 SERVICE 憑證
+          - set-owner             # 把某個 LINE user 標記為 owner
+          - logs                  # 看最近的應用日誌
+      line_user_id:
+        description: 'LINE User ID（create-owner-client / set-owner 需要）'
+        required: false
+        type: string
+      client_name:
+        description: '憑證名稱（create-*-client 需要）'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # 與部署互斥 —— 不要在容器重啟到一半時操作資料庫
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  admin:
+    name: ${{ inputs.action }}
+    runs-on: [self-hosted, Linux, X64]
+    env:
+      DEPLOY_PATH_OVERRIDE: ${{ vars.DEPLOY_PATH }}
+    steps:
+      - name: 解析部署目錄
+        run: |
+          set -euo pipefail
+          TARGET="${DEPLOY_PATH_OVERRIDE:-$HOME/notifyline}"
+          [ -f "$TARGET/.env" ] || { echo "::error::$TARGET/.env 不存在，請先部署一次"; exit 1; }
+          echo "DEPLOY_PATH=$TARGET" >> "$GITHUB_ENV"
+
+      # ── status ──────────────────────────────────────────────────────
+      - name: 服務狀態
+        if: inputs.action == 'status'
+        run: |
+          set -uo pipefail
+          cd "$DEPLOY_PATH"
+          APP_PORT=$(grep -E '^APP_PORT=' .env | cut -d= -f2 | tr -d ' \r')
+
+          {
+            echo "### 服務狀態"
+            echo ""
+            echo '```'
+            docker compose --env-file .env ps
+            echo '```'
+            echo ""
+            echo "**健康檢查**"
+            echo '```json'
+            curl -sS "http://127.0.0.1:${APP_PORT:-19080}/actuator/health" || echo "無回應"
+            echo ""
+            echo '```'
+            echo ""
+            echo "**目前 image**"
+            echo '```'
+            docker inspect --format='{{.Config.Image}}' notifyline-app 2>/dev/null || echo "容器未執行"
+            echo '```'
+            echo ""
+            echo "**資料統計**"
+            echo '```'
+            docker compose --env-file .env exec -T postgres \
+              psql -U "$(grep -E '^DB_USER=' .env | cut -d= -f2 | tr -d ' \r')" -d notifyline -c "
+                SELECT 'line_user' AS 表, count(*) AS 筆數 FROM line_user
+                UNION ALL SELECT 'line_user (ACTIVE)', count(*) FROM line_user WHERE status='ACTIVE'
+                UNION ALL SELECT 'line_user (owner)',  count(*) FROM line_user WHERE is_owner
+                UNION ALL SELECT 'client',             count(*) FROM client
+                UNION ALL SELECT 'client (ACTIVE)',    count(*) FROM client WHERE status='ACTIVE'
+                UNION ALL SELECT 'webhook_event',      count(*) FROM webhook_event
+                UNION ALL SELECT 'notification',       count(*) FROM notification;" 2>&1 || echo "查詢失敗"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── create client ───────────────────────────────────────────────
+      - name: 建立 OWNER 憑證
+        if: inputs.action == 'create-owner-client'
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+          [ -n "${{ inputs.line_user_id }}" ] || { echo "::error::需要 line_user_id"; exit 1; }
+          [ -n "${{ inputs.client_name }}" ]  || { echo "::error::需要 client_name"; exit 1; }
+
+          OUT=$(docker compose --env-file .env run --rm --no-deps app \
+            --create-client --name='${{ inputs.client_name }}' --owner \
+            --line-user-id='${{ inputs.line_user_id }}' 2>&1)
+
+          # ⚠️ secret 只在此刻存在。刻意「不」寫進 step summary ——
+          #    summary 會留在 GitHub 上供任何有 repo 讀權限的人查看。
+          #    請到 Actions 的 raw log 取用後立刻存進密碼管理器。
+          echo "$OUT"
+
+          {
+            echo "### 憑證已建立"
+            echo ""
+            echo "clientId 與 secret **只出現在這次執行的 raw log**，"
+            echo "刻意不寫進這份 summary（summary 會長期留存）。"
+            echo ""
+            echo "請展開上方的步驟日誌取用，並立刻存進密碼管理器。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 建立 SERVICE 憑證
+        if: inputs.action == 'create-service-client'
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+          [ -n "${{ inputs.client_name }}" ] || { echo "::error::需要 client_name"; exit 1; }
+
+          docker compose --env-file .env run --rm --no-deps app \
+            --create-client --name='${{ inputs.client_name }}' --service 2>&1
+
+          echo "### 憑證已建立（詳見上方 raw log）" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── set owner ───────────────────────────────────────────────────
+      - name: 標記 owner
+        if: inputs.action == 'set-owner'
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+          [ -n "${{ inputs.line_user_id }}" ] || { echo "::error::需要 line_user_id"; exit 1; }
+          DB_USER=$(grep -E '^DB_USER=' .env | cut -d= -f2 | tr -d ' \r')
+
+          docker compose --env-file .env exec -T postgres \
+            psql -U "$DB_USER" -d notifyline -c \
+            "UPDATE line_user SET is_owner = true, updated_at = now()
+              WHERE line_user_id = '${{ inputs.line_user_id }}';"
+
+          docker compose --env-file .env exec -T postgres \
+            psql -U "$DB_USER" -d notifyline -c \
+            "SELECT line_user_id, status, is_owner FROM line_user
+              WHERE line_user_id = '${{ inputs.line_user_id }}';"
+
+      # ── logs ────────────────────────────────────────────────────────
+      - name: 應用日誌
+        if: inputs.action == 'logs'
+        run: |
+          set -uo pipefail
+          cd "$DEPLOY_PATH"
+          {
+            echo "### 最近 120 行應用日誌"
+            echo '```'
+            docker compose --env-file .env logs --tail=120 --no-color app 2>&1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
