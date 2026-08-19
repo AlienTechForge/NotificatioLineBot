@@ -3,6 +3,7 @@ package com.jason.notifyline;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
@@ -15,6 +16,7 @@ import java.util.Arrays;
  * 設計文件見 {@code Docs/plan/}。
  */
 @SpringBootApplication
+@ConfigurationPropertiesScan
 @EnableScheduling
 public class NotifyLineApplication {
 
