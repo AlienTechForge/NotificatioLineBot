@@ -1,0 +1,36 @@
+# 本機開發。
+#
+# 注意：dev 必須指向「另一個測試用的 LINE Official Account」，
+# 否則測試訊息會直接發到真實使用者手機上。
+# 見 Docs/plan/06-LINE整合設計.md §7
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/notifyline}
+    username: ${DB_USER:notifyline}
+    password: ${DB_PASSWORD:notifyline}
+  jpa:
+    show-sql: false
+
+line:
+  bot:
+    # 給假值讓應用在沒有真實憑證時也能起來做骨架驗證。
+    # 真的要收 webhook / 發訊息時必須換成測試帳號的實際憑證。
+    channel-token: ${LINE_CHANNEL_TOKEN:dev-dummy-channel-token}
+    channel-secret: ${LINE_CHANNEL_SECRET:dev-dummy-channel-secret}
+
+app:
+  crypto:
+    keys:
+      # 固定的開發用 key（32 bytes base64）。
+      # 只能出現在 dev / test，絕不可與任何實際環境共用。
+      "1": ${APP_SECRET_ENC_KEY:ZGV2LW9ubHkta2V5LWRvLW5vdC11c2UtaW4tcHJvZCE=}
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.jason.notifyline: DEBUG
+    org.flywaydb: DEBUG

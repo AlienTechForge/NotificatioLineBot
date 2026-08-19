@@ -1,0 +1,59 @@
+# =====================================================================
+#  正式環境 compose —— 用 GHCR 上已建好的 image，不在 server 上 build。
+#
+#  與 docker-compose.yml 的差別：
+#    - image 從 registry 拉，不是本地 build（server 不需要 JDK/Maven/Node）
+#    - image tag 由 NOTIFYLINE_IMAGE 指定，預設 latest
+#
+#  由 CI 的 deploy job 送到 server 的 /opt/notifyline/docker-compose.yml。
+#  也可以手動用：
+#      NOTIFYLINE_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 \
+#        docker compose --env-file .env up -d
+#
+#  ⚠️ 本設定僅支援「單一 app 實例」。加開第二個實例前必須先處理
+#     缺口 G12（@Scheduled 在多實例會重複執行）與速率限制的 per-instance 計數。
+# =====================================================================
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: notifyline-postgres
+    environment:
+      POSTGRES_DB: notifyline
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      # PostgreSQL 18+ 要掛 /var/lib/postgresql（不是 .../data）。
+      # 映像自己會在底下建 major-version 專屬子目錄，讓日後 pg_upgrade --link
+      # 不跨掛載點。掛舊路徑容器會直接啟動失敗。
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d notifyline"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  app:
+    # 由 deploy job 以環境變數指定確切的 sha tag，讓每次部署可追溯、可回滾。
+    # 沒指定時退回 latest（手動操作用）。
+    image: ${NOTIFYLINE_IMAGE:-ghcr.io/alien7666/notificatiolinebot:latest}
+    container_name: notifyline-app
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # 只綁 127.0.0.1 —— 應用不直接對外，一律經同機的 nginx 反向代理。
+      # 容器內固定 8080，主機 port 由 APP_PORT 決定（8080 常被占用）。
+      - "127.0.0.1:${APP_PORT:-19080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  pgdata:

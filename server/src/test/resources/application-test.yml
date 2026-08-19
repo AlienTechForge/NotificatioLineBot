@@ -1,0 +1,34 @@
+# 自動化測試 profile。
+#
+# 資料庫由 Testcontainers 透過 @ServiceConnection 注入，這裡不設 datasource。
+# LINE 憑證一律是假值 —— 測試絕不呼叫真實 LINE API（見 08-測試計畫 §7）。
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+
+line:
+  bot:
+    channel-token: test-channel-token
+    channel-secret: test-channel-secret
+    handler:
+      path: /line/webhook
+
+app:
+  public-base-url: https://test.example.com
+  owner-line-user-id: ""
+  allowed-uri-hosts: example.com
+  crypto:
+    current-key-version: 1
+    # 測試專用固定 key（32 bytes base64）。只能出現在測試設定。
+    keys:
+      "1": dGVzdC1vbmx5LWtleS1ETy1OT1QtVVNFLUlOLVBST0Q=
+
+logging:
+  level:
+    root: WARN
+    com.jason.notifyline: INFO
+    org.flywaydb: WARN
