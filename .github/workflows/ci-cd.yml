@@ -132,27 +132,34 @@ jobs:
       group: deploy-prod
       cancel-in-progress: false
     env:
-      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/notifyline' }}
+      # 留空時在下方步驟解析為 $HOME/notifyline（runner 使用者一定寫得進去）
+      DEPLOY_PATH_OVERRIDE: ${{ vars.DEPLOY_PATH }}
       IMAGE_REF: ${{ needs.image.outputs.image_ref }}
     steps:
       - uses: actions/checkout@v4
 
-      # 部署目錄可能需要 sudo 才建得起來（/opt 通常是 root 的）。
-      # 先試無 sudo，失敗再試 passwordless sudo，都不行就明講。
+      # 部署目錄放在 runner 使用者的家目錄下。
+      #
+      # 不用 /opt/notifyline —— runner 以 github-actions 身分執行且沒有
+      # passwordless sudo，動不了 /opt。硬要用就得人工先建一次目錄，
+      # 那正是這裡想避免的。家目錄一定寫得進去，且權限天然隔離。
       - name: 準備部署目錄
         run: |
-          set -uo pipefail
-          if [ -d "$DEPLOY_PATH" ] && [ -w "$DEPLOY_PATH" ]; then
-            echo "$DEPLOY_PATH 已存在且可寫"
-          elif mkdir -p "$DEPLOY_PATH" 2>/dev/null; then
-            echo "已建立 $DEPLOY_PATH"
-          elif sudo -n mkdir -p "$DEPLOY_PATH" 2>/dev/null && sudo -n chown "$(id -un)" "$DEPLOY_PATH"; then
-            echo "已用 sudo 建立 $DEPLOY_PATH"
-          else
-            echo "::error::無法建立 $DEPLOY_PATH。請在 server 上執行："
-            echo "::error::  sudo mkdir -p $DEPLOY_PATH && sudo chown $(id -un) $DEPLOY_PATH"
+          set -euo pipefail
+          TARGET="${DEPLOY_PATH_OVERRIDE:-$HOME/notifyline}"
+          mkdir -p "$TARGET"
+          echo "DEPLOY_PATH=$TARGET" >> "$GITHUB_ENV"
+          echo "部署目錄：$TARGET（使用者 $(id -un)）"
+
+      - name: 檢查 docker 權限
+        run: |
+          set -euo pipefail
+          if ! docker info >/dev/null 2>&1; then
+            echo "::error::runner 使用者 $(id -un) 不能使用 docker。在 server 上執行："
+            echo "::error::  sudo usermod -aG docker $(id -un) && sudo systemctl restart actions.runner.*"
             exit 1
           fi
+          echo "docker 可用"
 
       # .env 由 CI 從 GitHub Secrets 產生 —— 單一真相來源，
       # 輪替機密只要改 Secret 再重跑一次部署，不必登入 server。
