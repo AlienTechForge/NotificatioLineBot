@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>NotifyLine Admin</title>
+    <link rel="stylesheet" href="/admin/assets/app.css">
+</head>
+<body>
+
+<header class="masthead">
+    <div class="masthead__inner">
+        <h1 class="wordmark">NotifyLine <span>Admin</span></h1>
+        <div class="masthead__spacer"></div>
+        <form method="post" action="/admin/logout" id="logoutForm">
+            <button type="submit" class="btn btn--sm">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+                </svg>
+                登出
+            </button>
+        </form>
+    </div>
+</header>
+
+<main class="shell" id="main">
+    <div class="page-head">
+        <div>
+            <h2>預設通知對象</h2>
+            <p>
+                設定每組憑證在請求未帶 <code>target</code> 時要通知誰。
+                這裡指定的收件人<strong>不需要對應的 scope</strong> ——
+                授權行為是你做的，不是呼叫端自己宣稱的。
+            </p>
+        </div>
+        <button type="button" class="btn btn--sm" id="refresh">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                <path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/>
+            </svg>
+            重新整理
+        </button>
+    </div>
+
+    <div id="pageError" class="notice notice--error" role="alert" hidden></div>
+
+    <section class="card" aria-labelledby="clientsHeading">
+        <h3 id="clientsHeading" class="visually-hidden">憑證清單</h3>
+
+        <div id="loading" class="loading">載入中…</div>
+
+        <div class="table-wrap" id="tableWrap" hidden>
+            <table class="clients">
+                <thead>
+                <tr>
+                    <th scope="col">憑證</th>
+                    <th scope="col">狀態</th>
+                    <th scope="col">預設通知對象</th>
+                    <th scope="col">Scope</th>
+                    <th scope="col"><span class="visually-hidden">操作</span></th>
+                </tr>
+                </thead>
+                <tbody id="clientRows"></tbody>
+            </table>
+        </div>
+
+        <div id="empty" class="empty" hidden>
+            還沒有任何憑證。用 GitHub Actions 的 <strong>Admin</strong> workflow 建立一組。
+        </div>
+    </section>
+</main>
+
+<!-- 編輯對話框。原生 <dialog> 自帶焦點陷阱與 Esc 關閉。 -->
+<dialog id="editDialog" aria-labelledby="dialogTitle">
+    <form method="dialog" id="editForm">
+        <div class="dialog__head">
+            <h3 id="dialogTitle">設定預設通知對象</h3>
+            <p id="dialogSubtitle"></p>
+        </div>
+
+        <div class="dialog__body">
+            <div id="dialogError" class="notice notice--error" role="alert" hidden></div>
+
+            <fieldset>
+                <legend class="fieldset-label">通知對象</legend>
+                <div class="choices">
+                    <label class="choice">
+                        <input type="radio" name="targetType" value="OWNER">
+                        <span>
+                            <span class="choice__title">管理者（OWNER）</span>
+                            <span class="choice__desc">所有標記為 owner 且仍是好友的使用者。最常見的選擇。</span>
+                        </span>
+                    </label>
+
+                    <label class="choice">
+                        <input type="radio" name="targetType" value="USER">
+                        <span>
+                            <span class="choice__title">指定使用者</span>
+                            <span class="choice__desc">從下方清單挑選。不需要授予 notify:user。</span>
+                        </span>
+                    </label>
+
+                    <label class="choice">
+                        <input type="radio" name="targetType" value="SELF">
+                        <span>
+                            <span class="choice__title">綁定的使用者（SELF）</span>
+                            <span class="choice__desc">只適用於綁定了 LINE 使用者的憑證。</span>
+                        </span>
+                    </label>
+
+                    <label class="choice">
+                        <input type="radio" name="targetType" value="ALL">
+                        <span>
+                            <span class="choice__title">全體好友（ALL）</span>
+                            <span class="choice__desc">所有仍是好友的使用者。會消耗大量 LINE 月額度。</span>
+                        </span>
+                    </label>
+
+                    <label class="choice">
+                        <input type="radio" name="targetType" value="">
+                        <span>
+                            <span class="choice__title">不設定</span>
+                            <span class="choice__desc">該憑證每次請求都必須自己帶 target，否則回 400。</span>
+                        </span>
+                    </label>
+                </div>
+            </fieldset>
+
+            <div id="userPickerField" hidden>
+                <p class="fieldset-label" id="userPickerLabel">收件人</p>
+                <div class="user-picker" id="userPicker" role="group" aria-labelledby="userPickerLabel"></div>
+                <p class="hint" id="userPickerHint">已選 0 人。</p>
+            </div>
+        </div>
+
+        <div class="dialog__foot">
+            <button type="button" class="btn" id="cancelBtn">取消</button>
+            <button type="submit" class="btn btn--primary" id="saveBtn">儲存</button>
+        </div>
+    </form>
+</dialog>
+
+<!-- aria-live 讓儲存結果被讀出，但不搶走焦點 -->
+<div class="toast" id="toast" aria-live="polite" aria-atomic="false"></div>
+
+<script src="/admin/assets/app.js"></script>
+</body>
+</html>

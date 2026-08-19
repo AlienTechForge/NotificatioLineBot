@@ -58,6 +58,7 @@ POC 說明見 [`poc/README.md`](poc/README.md) —— **不需要真實 LINE 憑
 | 想知道什麼 | 看哪裡 |
 |---|---|
 | **我要寫一個 client 來發通知** | [`Docs/AI-接入指南.md`](Docs/AI-接入指南.md) |
+| 設定某組憑證要通知誰 | 管理介面 `https://<你的網域>/admin/` |
 | 這專案要解決什麼、範圍到哪 | [`Docs/plan/01-PRD.md`](Docs/plan/01-PRD.md) |
 | 系統長什麼樣、用什麼版本 | [`Docs/plan/02-架構設計.md`](Docs/plan/02-架構設計.md) |
 | API 的設計理由與完整契約 | [`Docs/plan/05-API契約.md`](Docs/plan/05-API契約.md) |

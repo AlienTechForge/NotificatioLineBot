@@ -5,7 +5,7 @@ import com.jason.notifyline.common.ErrorCode;
 import com.jason.notifyline.common.LineLimits;
 import com.jason.notifyline.config.AppProperties;
 import com.jason.notifyline.notification.api.NotificationRequest;
-import com.jason.notifyline.notification.domain.TargetType;
+import com.jason.notifyline.common.TargetType;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 

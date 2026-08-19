@@ -6,7 +6,7 @@ import com.jason.notifyline.common.ApiException;
 import com.jason.notifyline.common.ErrorCode;
 import com.jason.notifyline.lineuser.LineUserService;
 import com.jason.notifyline.notification.api.NotificationRequest;
-import com.jason.notifyline.notification.domain.TargetType;
+import com.jason.notifyline.common.TargetType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -58,7 +58,20 @@ class TargetResolverTest {
 
     private static ClientPrincipal principal(String bound, Scope... scopes) {
         Set<Scope> set = scopes.length == 0 ? EnumSet.noneOf(Scope.class) : Set.of(scopes);
-        return new ClientPrincipal(1L, "cli_test", bound, set, null, null);
+        return new ClientPrincipal(1L, "cli_test", bound, set, null, null, null, List.of());
+    }
+
+    /** 管理者已設定預設對象的 client。scope 刻意留空，證明預設對象不需要 scope。 */
+    private static ClientPrincipal withDefault(TargetType type, List<String> userIds,
+                                               Scope... scopes) {
+        Set<Scope> set = scopes.length == 0 ? EnumSet.noneOf(Scope.class) : Set.of(scopes);
+        return new ClientPrincipal(1L, "cli_test", BOUND, set, null, null, type, userIds);
+    }
+
+    /** 沒有 target 的請求 —— 要求套用 client 的預設對象。 */
+    private static NotificationRequest withoutTarget() {
+        return new NotificationRequest(
+                null, new NotificationRequest.Message(null, "x"), null, null);
     }
 
     private static NotificationRequest request(TargetType type, List<String> userIds) {
@@ -208,5 +221,89 @@ class TargetResolverTest {
                 principal(BOUND), request(TargetType.SELF, null)))
                 .extracting(e -> ((ApiException) e).getCode())
                 .isEqualTo(ErrorCode.SCOPE_DENIED);
+    }
+
+    // ----------------------------------------------- 管理者設定的預設對象
+
+    @Test
+    @DisplayName("請求沒帶 target 時套用 client 的預設對象")
+    void defaultTargetApplied() {
+        assertThat(resolver.resolve(withDefault(TargetType.OWNER, List.of()), withoutTarget()))
+                .containsExactly(OWNER_ID);
+    }
+
+    @Test
+    @DisplayName("預設對象「不」檢查 scope —— 授權行為是管理者做的")
+    void defaultTargetSkipsScopeCheck() {
+        // 完全沒有任何 scope，卻被管理者指定送給特定使用者
+        ClientPrincipal noScopes = withDefault(TargetType.USER, List.of(OTHER));
+
+        assertThat(resolver.resolve(noScopes, withoutTarget())).containsExactly(OTHER);
+    }
+
+    @Test
+    @DisplayName("預設對象是 ALL 也不需要 notify:all")
+    void defaultTargetAllSkipsScopeCheck() {
+        assertThat(resolver.resolve(withDefault(TargetType.ALL, List.of()), withoutTarget()))
+                .containsExactly(BOUND, OWNER_ID, OTHER);
+    }
+
+    @Test
+    @DisplayName("有預設對象不代表可以自己指定 —— 請求裡的 target 照樣要 scope")
+    void defaultTargetDoesNotGrantRequestedTarget() {
+        // 管理者把預設設成 USER，但這不該讓 client 自己挑收件人
+        ClientPrincipal principal = withDefault(TargetType.USER, List.of(OTHER));
+
+        assertThatThrownBy(() -> resolver.resolve(principal, request(TargetType.ALL, null)))
+                .isInstanceOf(ApiException.class)
+                .extracting(e -> ((ApiException) e).getCode())
+                .isEqualTo(ErrorCode.SCOPE_DENIED);
+    }
+
+    @Test
+    @DisplayName("沒設預設對象又沒帶 target → 400，訊息要說得出該怎麼辦")
+    void noTargetAndNoDefault() {
+        assertThatThrownBy(() -> resolver.resolve(
+                principal(BOUND, Scope.NOTIFY_OWNER), withoutTarget()))
+                .isInstanceOf(ApiException.class)
+                .hasMessageContaining("default notification target")
+                .extracting(e -> ((ApiException) e).getCode())
+                .isEqualTo(ErrorCode.VALIDATION_ERROR);
+    }
+
+    @Test
+    @DisplayName("預設對象裡已封鎖的人被過濾掉")
+    void defaultTargetFiltersInactive() {
+        lenient().when(lineUserService.activeAmong(List.of(OTHER))).thenReturn(List.of());
+
+        assertThatThrownBy(() -> resolver.resolve(
+                withDefault(TargetType.USER, List.of(OTHER)), withoutTarget()))
+                .extracting(e -> ((ApiException) e).getCode())
+                .isEqualTo(ErrorCode.NO_RECIPIENT);
+    }
+
+    @Test
+    @DisplayName("lineMessages 仍然要 notify:raw，即使走的是預設對象")
+    void defaultTargetStillRequiresRawScope() {
+        NotificationRequest raw = new NotificationRequest(
+                null, null, List.of(Map.of("type", "text", "text", "x")), null);
+
+        assertThatThrownBy(() -> resolver.resolve(
+                withDefault(TargetType.OWNER, List.of()), raw))
+                .hasMessageContaining("notify:raw")
+                .extracting(e -> ((ApiException) e).getCode())
+                .isEqualTo(ErrorCode.SCOPE_DENIED);
+    }
+
+    @Test
+    @DisplayName("effectiveType 與 resolve 的判斷一致")
+    void effectiveTypeMatchesResolution() {
+        ClientPrincipal withOwnerDefault = withDefault(TargetType.OWNER, List.of());
+
+        assertThat(resolver.effectiveType(withOwnerDefault, withoutTarget()))
+                .isEqualTo(TargetType.OWNER);
+        assertThat(resolver.effectiveType(
+                principal(BOUND, Scope.NOTIFY_SELF), request(TargetType.SELF, null)))
+                .isEqualTo(TargetType.SELF);
     }
 }

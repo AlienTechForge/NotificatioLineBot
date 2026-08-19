@@ -15,9 +15,10 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 /**
  * 路徑分流。設計見 {@code Docs/plan/03-權限與認證設計.md} §6。
  *
- * <p>Phase 2 會加上第二條 chain（{@code /admin/**}，LINE Login + session，
- * 見 ADR-0009），兩者以 {@code securityMatcher} 分流。<strong>那條 chain 必須
- * 重新啟用 CSRF</strong> —— 有 cookie 就有 CSRF 風險，而這條 API chain 沒有。
+ * <p>管理介面走另一條 chain（{@code /admin/**}，帳密 + session），見
+ * {@code AdminSecurityConfig}。兩者以 {@code securityMatcher} 分流，
+ * <strong>那條 chain 必須啟用 CSRF</strong> —— 有 cookie 就有 CSRF 風險，
+ * 而這條 API chain 沒有 cookie 也沒有 session，所以不適用。
  */
 @Configuration
 @EnableWebSecurity

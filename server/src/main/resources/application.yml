@@ -93,6 +93,13 @@ app:
     # profile 校正，它們與發送共用同一個 channel 的配額。
     rate-limit-per-second: ${LINE_RATE_LIMIT_PER_SECOND:100}
 
+  # 管理介面登入帳密。來源是 GitHub Secrets，部署時寫進 .env。
+  # 兩者留空 = 整個管理介面停用（連登入頁都不存在）。
+  # 忘記設定的後果是「後台用不了」，而不是「後台沒有密碼」。
+  admin:
+    username: ${APP_ADMIN_USERNAME:}
+    password: ${APP_ADMIN_PASSWORD:}
+
   crypto:
     current-key-version: ${APP_SECRET_ENC_KEY_VERSION:1}
     keys:

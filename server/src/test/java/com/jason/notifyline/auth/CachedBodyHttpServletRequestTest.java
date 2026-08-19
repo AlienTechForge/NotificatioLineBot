@@ -1,6 +1,7 @@
 package com.jason.notifyline.auth;
 
 import com.jason.notifyline.client.Scope;
+import com.jason.notifyline.common.TargetType;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -97,9 +98,10 @@ class CachedBodyHttpServletRequestTest {
     @DisplayName("ClientPrincipal：scope 判斷與綁定狀態")
     void clientPrincipal_scopesAndBinding() {
         ClientPrincipal bound = new ClientPrincipal(
-                1L, "cli_x", "U000", Set.of(Scope.NOTIFY_SELF), null, null);
+                1L, "cli_x", "U000", Set.of(Scope.NOTIFY_SELF), null, null, null, null);
         ClientPrincipal service = new ClientPrincipal(
-                2L, "cli_y", null, Set.of(Scope.NOTIFY_OWNER), 30, 100);
+                2L, "cli_y", null, Set.of(Scope.NOTIFY_OWNER), 30, 100,
+                TargetType.OWNER, null);
 
         assertThat(bound.isBound()).isTrue();
         assertThat(bound.hasScope(Scope.NOTIFY_SELF)).isTrue();
@@ -108,12 +110,19 @@ class CachedBodyHttpServletRequestTest {
         assertThat(service.isBound()).isFalse();
         assertThat(service.rateLimitPerMin()).isEqualTo(30);
         assertThat(service.dailyMessageQuota()).isEqualTo(100);
+
+        // 沒設預設對象與有設，要能分辨
+        assertThat(bound.hasDefaultTarget()).isFalse();
+        assertThat(service.hasDefaultTarget()).isTrue();
+        // null 的收件人清單正規化成空清單，呼叫端不必判 null
+        assertThat(service.defaultTargetUserIds()).isEmpty();
     }
 
     @Test
     @DisplayName("ClientPrincipal：scopes 對外唯讀，空集合也不例外")
     void clientPrincipal_scopesAreImmutable() {
-        ClientPrincipal empty = new ClientPrincipal(1L, "cli_x", null, Set.of(), null, null);
+        ClientPrincipal empty = new ClientPrincipal(
+                1L, "cli_x", null, Set.of(), null, null, null, null);
 
         assertThat(empty.scopes()).isEmpty();
         assertThatThrownBy(() -> empty.scopes().add(Scope.NOTIFY_ALL))

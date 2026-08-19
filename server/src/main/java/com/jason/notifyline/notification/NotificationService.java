@@ -18,7 +18,7 @@ import com.jason.notifyline.notification.domain.NotificationDelivery;
 import com.jason.notifyline.notification.domain.NotificationDeliveryRepository;
 import com.jason.notifyline.notification.domain.NotificationRepository;
 import com.jason.notifyline.notification.domain.NotificationStatus;
-import com.jason.notifyline.notification.domain.TargetType;
+import com.jason.notifyline.common.TargetType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -107,6 +107,10 @@ public class NotificationService {
 
         // 內容檢查先做，不佔資料庫鎖
         List<Map<String, Object>> messages = messageAssembler.assemble(request);
+        // 算一次就好。target 可能來自請求，也可能來自 client 的預設對象 ——
+        // 兩處各算一次遲早會分岔，而分岔的結果是「記錄下來的型別」與
+        // 「實際送給誰」不一致，事後查紀錄會查到錯的結論。
+        TargetType effectiveType = targetResolver.effectiveType(principal, request);
         List<String> recipients = targetResolver.resolve(principal, request);
         List<List<String>> batches = BatchSplitter.split(recipients);
 
@@ -125,7 +129,7 @@ public class NotificationService {
                 principal.id(),
                 idempotencyKey,
                 requestId,
-                request.target().type().name(),
+                effectiveType.name(),
                 objectMapper.writeValueAsString(PayloadEnvelope.build(
                         messages,
                         request.options().notificationDisabledOrDefault(),
@@ -145,11 +149,11 @@ public class NotificationService {
             return replay(winner, payloadHash, idempotencyKey);
         }
 
-        persistBatches(id, batches, request.target().type(), now);
+        persistBatches(id, batches, effectiveType, now);
         kickAfterCommit();
 
         log.info("受理通知：notificationId={} target={} recipients={} batches={} client={}",
-                id, request.target().type(), recipientCount, batches.size(), principal.clientId());
+                id, effectiveType, recipientCount, batches.size(), principal.clientId());
 
         return new NotificationAccepted(
                 id, NotificationStatus.QUEUED.name(), recipientCount, batches.size());

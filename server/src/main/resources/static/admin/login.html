@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="utf-8">
+    <!-- 絕不禁用縮放 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>登入 — NotifyLine Admin</title>
+    <link rel="stylesheet" href="/admin/assets/app.css">
+</head>
+<body>
+<main class="login-shell">
+    <div class="card login-card">
+        <h1>NotifyLine</h1>
+        <p>管理介面</p>
+
+        <!-- role="alert" 讓螢幕閱讀器在登入失敗時立刻讀出，不必使用者自己找 -->
+        <div id="error" class="notice notice--error" role="alert" hidden>
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                <circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>
+            </svg>
+            <span>帳號或密碼不正確。</span>
+        </div>
+
+        <div id="loggedOut" class="notice notice--success" role="status" hidden>
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                <path d="M20 6 9 17l-5-5"/>
+            </svg>
+            <span>已登出。</span>
+        </div>
+
+        <form method="post" action="/admin/login">
+            <div class="field">
+                <!-- 可見的 label，不用 placeholder 代替 -->
+                <label for="username">帳號</label>
+                <input type="text" id="username" name="username"
+                       autocomplete="username" required autofocus
+                       autocapitalize="none" spellcheck="false">
+            </div>
+
+            <div class="field">
+                <label for="password">密碼</label>
+                <!-- 允許密碼管理器與貼上：擋掉它們只會逼人用弱密碼 -->
+                <input type="password" id="password" name="password"
+                       autocomplete="current-password" required>
+            </div>
+
+            <button type="submit" class="btn btn--primary">登入</button>
+        </form>
+    </div>
+</main>
+
+<script>
+    // 用 URL 參數決定顯示哪個提示。不把訊息直接塞進 innerHTML，
+    // 兩則訊息都是頁面裡寫死的靜態文字。
+    const params = new URLSearchParams(location.search);
+    if (params.has('error')) {
+        const box = document.getElementById('error');
+        box.hidden = false;
+        document.getElementById('password').focus();
+    }
+    if (params.has('logout')) {
+        document.getElementById('loggedOut').hidden = false;
+    }
+
+    // 登入表單也要 CSRF token。這是靜態頁，沒有伺服器端樣板可以插入 ${_csrf}，
+    // 所以從 XSRF-TOKEN cookie 讀出來再補成隱藏欄位。
+    // 少了它，登入一律 403，而錯誤訊息不會提到 CSRF。
+    document.querySelector('form').addEventListener('submit', (event) => {
+        const hit = document.cookie.split('; ').find((r) => r.startsWith('XSRF-TOKEN='));
+        if (!hit) return;
+        const field = document.createElement('input');
+        field.type = 'hidden';
+        field.name = '_csrf';
+        field.value = decodeURIComponent(hit.slice('XSRF-TOKEN='.length));
+        event.currentTarget.append(field);
+    });
+</script>
+</body>
+</html>

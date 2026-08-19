@@ -180,6 +180,8 @@ jobs:
           APP_PUBLIC_BASE_URL=${{ vars.APP_PUBLIC_BASE_URL }}
           APP_OWNER_LINE_USER_ID=${{ vars.APP_OWNER_LINE_USER_ID }}
           APP_ALLOWED_URI_HOSTS=${{ vars.APP_ALLOWED_URI_HOSTS }}
+          APP_ADMIN_USERNAME=${{ secrets.APP_ADMIN_USERNAME }}
+          APP_ADMIN_PASSWORD=${{ secrets.APP_ADMIN_PASSWORD }}
           DB_URL=jdbc:postgresql://postgres:5432/notifyline
           DB_USER=${{ vars.DB_USER || 'notifyline' }}
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
@@ -189,6 +191,23 @@ jobs:
           # heredoc 內的縮排要去掉（用 <<'EOF' 不能用 <<-，這裡自己處理）
           sed -i 's/^          //' "$DEPLOY_PATH/.env"
           chmod 600 "$DEPLOY_PATH/.env"
+
+          # 管理介面只要有一半設定就是錯的：有帳號沒密碼會讓應用啟動失敗，
+          # 有密碼沒帳號會讓整個管理介面靜悄悄地不存在。與其之後查半天，
+          # 不如在這裡就擋下來。
+          admin_user=$(grep -E '^APP_ADMIN_USERNAME=' "$DEPLOY_PATH/.env" | cut -d= -f2-)
+          admin_pass=$(grep -E '^APP_ADMIN_PASSWORD=' "$DEPLOY_PATH/.env" | cut -d= -f2-)
+          if [ -n "$admin_user$admin_pass" ] && { [ -z "$admin_user" ] || [ -z "$admin_pass" ]; }; then
+            echo "::error::APP_ADMIN_USERNAME 與 APP_ADMIN_PASSWORD 必須同時設定或同時留空"
+            exit 1
+          fi
+          if [ -n "$admin_pass" ] && [ "${#admin_pass}" -lt 12 ]; then
+            echo "::error::APP_ADMIN_PASSWORD 至少要 12 個字元"
+            exit 1
+          fi
+          if [ -z "$admin_user" ]; then
+            echo "::notice::未設定 APP_ADMIN_USERNAME，管理介面停用"
+          fi
 
           # 不輸出值，只確認關鍵欄位有內容
           for k in LINE_CHANNEL_TOKEN LINE_CHANNEL_SECRET APP_SECRET_ENC_KEY DB_PASSWORD; do
