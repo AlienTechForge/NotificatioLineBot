@@ -13,7 +13,7 @@ import com.jason.notifyline.notification.domain.DeliveryStatus;
 import com.jason.notifyline.notification.domain.NotificationDeliveryRepository;
 import com.jason.notifyline.notification.domain.NotificationRepository;
 import com.jason.notifyline.notification.domain.NotificationStatus;
-import com.jason.notifyline.notification.domain.TargetType;
+import com.jason.notifyline.common.TargetType;
 import com.jason.notifyline.support.PostgresIntegrationTest;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import mockwebserver3.MockResponse;

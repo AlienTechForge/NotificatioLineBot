@@ -1,5 +1,6 @@
 package com.jason.notifyline.notification.domain;
 
+import com.jason.notifyline.common.TargetType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;

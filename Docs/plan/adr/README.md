@@ -16,8 +16,9 @@
 | [0006](0006-CICD-採-self-hosted-runner.md) | CI/CD 採 self-hosted runner | Accepted |
 | [0007](0007-非同步採-DB-outbox-而非訊息中介.md) | 非同步採 DB outbox 而非訊息中介 | Accepted |
 | [0008](0008-鎖定-Spring-Boot-4.1-並覆寫-Jackson-2-版本.md) | 鎖定 Spring Boot 4.1 並覆寫 Jackson 2 版本 | Accepted |
-| [0009](0009-Admin-認證採-LINE-Login.md) | Admin 認證採 LINE Login | Accepted（Phase 2 實作） |
+| [0009](0009-Admin-認證採-LINE-Login.md) | Admin 認證採 LINE Login | **Superseded by 0011** |
 | [0010](0010-CICD-改採-GHCR-加-SSH-部署.md) | image 走 GHCR，部署仍由 self-hosted runner 執行（含一次判斷失誤的修正紀錄） | Accepted |
+| [0011](0011-管理介面採帳密登入.md) | 管理介面採帳密登入，帳密來源為 GitHub Secrets | Accepted |
 
 ## 格式
 

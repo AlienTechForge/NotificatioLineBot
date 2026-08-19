@@ -1,6 +1,6 @@
 package com.jason.notifyline.notification.api;
 
-import com.jason.notifyline.notification.domain.TargetType;
+import com.jason.notifyline.common.TargetType;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -12,11 +12,12 @@ import java.util.Map;
 /**
  * {@code POST /api/v1/notifications} 的請求。契約見 {@code Docs/plan/05-API契約.md} §2.1。
  *
+ * @param target       選填。省略時使用管理者為此 client 設定的<strong>預設通知對象</strong>；
+ *                     沒設定預設對象時省略會得到 400
  * @param message      簡易模式（純文字）。與 {@code lineMessages} 二擇一
  * @param lineMessages 進階模式：原始 LINE message object。<strong>需要 notify:raw scope</strong>
  */
 public record NotificationRequest(
-        @NotNull(message = "target is required")
         @Valid Target target,
 
         @Valid Message message,
@@ -49,6 +50,16 @@ public record NotificationRequest(
 
     public boolean usesRawMessages() {
         return lineMessages != null && !lineMessages.isEmpty();
+    }
+
+    /**
+     * 呼叫端是否自己指定了 target。
+     *
+     * <p>{@code false} 代表要套用 client 的預設對象 —— 兩者的授權來源不同，
+     * 見 {@code TargetResolver} 的說明。
+     */
+    public boolean hasTarget() {
+        return target != null && target.type() != null;
     }
 
     /**

@@ -22,6 +22,7 @@ on:
           - set-owner             # 把某個 LINE user 標記為 owner
           - list-clients          # 列出所有憑證（不含 secret）
           - revoke-client         # 作廢某組憑證（不可回復）
+          - reload-admin-login    # 從 GitHub Secrets 重新讀取管理介面帳密
           - logs                  # 看最近的應用日誌
       line_user_id:
         description: 'LINE User ID（create-owner-client / set-owner 需要）'
@@ -224,6 +225,72 @@ jobs:
             echo '```'
             echo ""
             echo "該憑證之後的任何請求都會得到 401。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── admin login ─────────────────────────────────────────────────
+      #
+      # 改了 APP_ADMIN_USERNAME / APP_ADMIN_PASSWORD 這兩個 Secret 之後跑這個，
+      # 就不必為了換一組密碼而重新部署整個服務。
+      #
+      # 只改寫 .env 裡的那兩行，其餘設定原封不動 —— 重新產生整份 .env 會把
+      # 「部署當下的 Secret 值」一起帶進來，那不是這個動作該做的事。
+      - name: 重新讀取管理帳密
+        if: inputs.action == 'reload-admin-login'
+        env:
+          NEW_USERNAME: ${{ secrets.APP_ADMIN_USERNAME }}
+          NEW_PASSWORD: ${{ secrets.APP_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+
+          if [ -n "$NEW_USERNAME$NEW_PASSWORD" ] \
+             && { [ -z "$NEW_USERNAME" ] || [ -z "$NEW_PASSWORD" ]; }; then
+            echo "::error::APP_ADMIN_USERNAME 與 APP_ADMIN_PASSWORD 必須同時設定或同時留空"
+            exit 1
+          fi
+          if [ -n "$NEW_PASSWORD" ] && [ "${#NEW_PASSWORD}" -lt 12 ]; then
+            echo "::error::APP_ADMIN_PASSWORD 至少要 12 個字元"
+            exit 1
+          fi
+
+          umask 077
+          # 先刪掉舊的兩行再補上新的。用 grep -v 而不是 sed 的就地取代 ——
+          # 密碼可能含有 sed 會當成分隔符或反向參照的字元（/ & \），
+          # 就地取代會把它們默默改掉，結果是「密碼設了但登不進去」。
+          grep -v -E '^APP_ADMIN_(USERNAME|PASSWORD)=' .env > .env.next
+          {
+            printf 'APP_ADMIN_USERNAME=%s\n' "$NEW_USERNAME"
+            printf 'APP_ADMIN_PASSWORD=%s\n' "$NEW_PASSWORD"
+          } >> .env.next
+          mv .env.next .env
+          chmod 600 .env
+
+          # 帳密只在啟動時讀取並雜湊，所以一定要重啟才會生效。
+          # compose 檔是部署時複製成 $DEPLOY_PATH/docker-compose.yml 的，
+          # 這裡用預設檔名即可；NOTIFYLINE_IMAGE 由前面的步驟寫進 GITHUB_ENV。
+          docker compose --env-file .env up -d --no-deps app
+
+          APP_PORT=$(grep -E '^APP_PORT=' .env | cut -d= -f2 | tr -d ' \r')
+          APP_PORT="${APP_PORT:-19080}"
+
+          ok=false
+          for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:${APP_PORT}/actuator/health" | grep -q '"status":"UP"'; then
+              ok=true
+              break
+            fi
+            sleep 2
+          done
+          [ "$ok" = true ] || { echo "::error::重啟後健康檢查未通過"; exit 1; }
+
+          {
+            echo "### 管理帳密已更新"
+            echo ""
+            if [ -z "$NEW_USERNAME" ]; then
+              echo "兩個 Secret 都是空的，**管理介面已停用**（連登入頁都不存在）。"
+            else
+              echo "應用已重啟並通過健康檢查。舊的登入 session 已全部失效，請重新登入。"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ── logs ────────────────────────────────────────────────────────

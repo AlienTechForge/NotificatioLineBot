@@ -1,5 +1,6 @@
 package com.jason.notifyline.client;
 
+import com.jason.notifyline.common.TargetType;
 import jakarta.persistence.CollectionTable;
 import jakarta.persistence.Column;
 import jakarta.persistence.ElementCollection;
@@ -12,9 +13,12 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Table;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 import java.util.Collections;
+import java.util.List;
 import java.util.EnumSet;
 import java.util.Set;
 
@@ -67,6 +71,24 @@ public class Client {
     /** null = 不限。 */
     @Column(name = "daily_message_quota")
     private Integer dailyMessageQuota;
+
+    /**
+     * 請求未帶 {@code target} 時使用的通知對象。null = 沒設定。
+     *
+     * <p>這是<strong>管理者</strong>指定的，所以套用時不做 scope 檢查 ——
+     * 授權行為本身就是管理者做的。呼叫端自己在請求裡指定的 target 才需要 scope。
+     *
+     * <p>這條界線讓「只被信任發給預設對象」的 service 可以被指向任意收件人組合，
+     * 卻拿不到 {@code notify:user}（那等於能發給任何人）。
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "default_target_type", length = 16)
+    private TargetType defaultTargetType;
+
+    /** 僅 {@code defaultTargetType = USER} 時有值。 */
+    @JdbcTypeCode(SqlTypes.ARRAY)
+    @Column(name = "default_target_user_ids")
+    private String[] defaultTargetUserIds;
 
     @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "client_scope", joinColumns = @JoinColumn(name = "client_id"))
@@ -198,6 +220,44 @@ public class Client {
 
     public Instant getLastUsedAt() {
         return lastUsedAt;
+    }
+
+    public TargetType getDefaultTargetType() {
+        return defaultTargetType;
+    }
+
+    public List<String> getDefaultTargetUserIds() {
+        return defaultTargetUserIds == null ? List.of() : List.of(defaultTargetUserIds);
+    }
+
+    public boolean hasDefaultTarget() {
+        return defaultTargetType != null;
+    }
+
+    /**
+     * 由管理者設定預設通知對象。
+     *
+     * <p>{@code type = null} 代表清除設定，之後該 client 每次都必須自己指定 target。
+     *
+     * <p>不變式在這裡強制：USER 一定要有名單，其餘型別一定不能有。資料庫也有相同的
+     * 約束（{@code client_default_target_users_chk}），兩邊都擋是刻意的 ——
+     * 應用層給出好的錯誤訊息，資料庫則保證即使有人直接下 SQL 也進不了壞資料。
+     */
+    public void setDefaultTarget(TargetType type, List<String> userIds, Instant now) {
+        if (type == TargetType.USER) {
+            if (userIds == null || userIds.isEmpty()) {
+                throw new IllegalArgumentException("default target USER requires at least one userId");
+            }
+            this.defaultTargetUserIds = List.copyOf(userIds).toArray(String[]::new);
+        } else {
+            if (userIds != null && !userIds.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "userIds is only allowed when the default target type is USER");
+            }
+            this.defaultTargetUserIds = null;
+        }
+        this.defaultTargetType = type;
+        this.updatedAt = now;
     }
 
     /** 不輸出任何密文或 IV。 */

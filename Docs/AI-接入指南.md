@@ -206,8 +206,8 @@ Content-Type: application/json
 
 ```jsonc
 {
-  "target": {
-    "type": "OWNER",          // 必填：SELF | OWNER | USER | ALL
+  "target": {                 // 選填！省略時使用管理者設定的預設對象。見 §4.2.1
+    "type": "OWNER",          // SELF | OWNER | USER | ALL
     "userIds": null           // 只有 type=USER 需要，最多 500 個
   },
   "message": {                // 簡易模式。與 lineMessages 二擇一
@@ -237,6 +237,32 @@ Content-Type: application/json
 
 **`message` 與 `lineMessages` 必須恰好給一個。** 兩個都給或都不給都回 400 ——
 不會替你猜哪個優先。
+
+### 4.2.1 省略 target：使用預設通知對象
+
+管理者可以在管理介面為每組憑證指定「預設通知對象」。設定之後，**請求可以完全
+省略 `target`**：
+
+```json
+{ "message": { "text": "備份完成" } }
+```
+
+這是大多數 service 該用的寫法：要通知誰是部署時的決定，不是每次呼叫都要重複的參數。
+之後管理者改了對象，你的程式一行都不用動。
+
+| 情況 | 結果 |
+|---|---|
+| 有設預設對象，請求省略 `target` | 送給預設對象 |
+| 有設預設對象，請求帶了 `target` | **以請求為準**，且照常檢查 scope |
+| 沒設預設對象，請求省略 `target` | `400 VALIDATION_ERROR` |
+
+**關鍵差異**：管理者設定的預設對象**不需要對應的 scope**。一組只有
+`notify:owner` 的憑證，可以被管理者指向任意收件人組合 —— 授權行為是管理者做的。
+但這不會讓它自己有能力指定收件人：請求裡出現 `target.type = USER` 仍然需要
+`notify:user`。
+
+打 `GET /api/v1/whoami` 看不到預設對象；那是管理端的設定，呼叫端不需要知道。
+如果你省略 `target` 卻拿到 400，代表管理者還沒設定。
 
 ### 4.3 Response（202 Accepted）
 
@@ -431,7 +457,7 @@ GET https://notify.example.com/api/v1/whoami
 
 | HTTP | code | 意義 | 該怎麼辦 |
 |---|---|---|---|
-| 400 | `VALIDATION_ERROR` | 請求格式或欄位不合法 | 修正請求。**不要重試** |
+| 400 | `VALIDATION_ERROR` | 請求格式或欄位不合法，或省略 `target` 但沒有預設對象 | 修正請求。**不要重試** |
 | 400 | `CLIENT_NOT_BOUND` | 憑證沒綁定 LINE 使用者卻送 `SELF` | 改用 `target.type = OWNER` |
 | 400 | `NO_RECIPIENT` | 解析後沒有有效收件人 | 檢查目標使用者是否還是好友 |
 | 400 | `URI_HOST_NOT_ALLOWED` | 連結網域不在白名單 | 移除連結，或請管理者加白名單 |
