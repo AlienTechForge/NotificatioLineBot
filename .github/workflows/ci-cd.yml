@@ -137,18 +137,63 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 檢查部署目錄與 .env
+      # 部署目錄可能需要 sudo 才建得起來（/opt 通常是 root 的）。
+      # 先試無 sudo，失敗再試 passwordless sudo，都不行就明講。
+      - name: 準備部署目錄
+        run: |
+          set -uo pipefail
+          if [ -d "$DEPLOY_PATH" ] && [ -w "$DEPLOY_PATH" ]; then
+            echo "$DEPLOY_PATH 已存在且可寫"
+          elif mkdir -p "$DEPLOY_PATH" 2>/dev/null; then
+            echo "已建立 $DEPLOY_PATH"
+          elif sudo -n mkdir -p "$DEPLOY_PATH" 2>/dev/null && sudo -n chown "$(id -un)" "$DEPLOY_PATH"; then
+            echo "已用 sudo 建立 $DEPLOY_PATH"
+          else
+            echo "::error::無法建立 $DEPLOY_PATH。請在 server 上執行："
+            echo "::error::  sudo mkdir -p $DEPLOY_PATH && sudo chown $(id -un) $DEPLOY_PATH"
+            exit 1
+          fi
+
+      # .env 由 CI 從 GitHub Secrets 產生 —— 單一真相來源，
+      # 輪替機密只要改 Secret 再重跑一次部署，不必登入 server。
+      #
+      # 取捨：機密因此存在 GitHub Secrets（加密儲存，只在本組織的 private repo
+      # 的 workflow 執行時解密）。若要改回「.env 只在 server 上、CI 完全碰不到」，
+      # 把這個 step 換成「檢查 .env 是否存在」即可。
+      - name: 產生 .env
         run: |
           set -euo pipefail
-          if [ ! -d "$DEPLOY_PATH" ]; then
-            echo "::error::$DEPLOY_PATH 不存在。先在 server 上執行 deploy/server-setup.sh"
-            exit 1
-          fi
-          if [ ! -f "$DEPLOY_PATH/.env" ]; then
-            echo "::error::$DEPLOY_PATH/.env 不存在。機密由 server 端管理，不經 CI"
-            exit 1
-          fi
-          echo "部署目錄與 .env 就緒"
+          umask 077
+          cat > "$DEPLOY_PATH/.env" <<'ENVEOF'
+          LINE_CHANNEL_TOKEN=${{ secrets.LINE_CHANNEL_TOKEN }}
+          LINE_CHANNEL_SECRET=${{ secrets.LINE_CHANNEL_SECRET }}
+          APP_SECRET_ENC_KEY=${{ secrets.APP_SECRET_ENC_KEY }}
+          APP_SECRET_ENC_KEY_VERSION=${{ vars.APP_SECRET_ENC_KEY_VERSION || '1' }}
+          APP_SECRET_ENC_KEY_V2=${{ secrets.APP_SECRET_ENC_KEY_V2 }}
+          APP_PUBLIC_BASE_URL=${{ vars.APP_PUBLIC_BASE_URL }}
+          APP_OWNER_LINE_USER_ID=${{ vars.APP_OWNER_LINE_USER_ID }}
+          APP_ALLOWED_URI_HOSTS=${{ vars.APP_ALLOWED_URI_HOSTS }}
+          DB_URL=jdbc:postgresql://postgres:5432/notifyline
+          DB_USER=${{ vars.DB_USER || 'notifyline' }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          APP_PORT=${{ vars.APP_PORT || '19080' }}
+          SPRING_PROFILES_ACTIVE=prod
+          ENVEOF
+          # heredoc 內的縮排要去掉（用 <<'EOF' 不能用 <<-，這裡自己處理）
+          sed -i 's/^          //' "$DEPLOY_PATH/.env"
+          chmod 600 "$DEPLOY_PATH/.env"
+
+          # 不輸出值，只確認關鍵欄位有內容
+          for k in LINE_CHANNEL_TOKEN LINE_CHANNEL_SECRET APP_SECRET_ENC_KEY DB_PASSWORD; do
+            v=$(grep -E "^${k}=" "$DEPLOY_PATH/.env" | cut -d= -f2-)
+            [ -n "$v" ] || { echo "::error::$k 是空的，檢查 GitHub Secrets"; exit 1; }
+            echo "  $k: 已設定（${#v} 字元）"
+          done
+
+          # 加密金鑰長度錯的話應用會拒絕啟動，先在這裡擋下
+          klen=$(grep -E '^APP_SECRET_ENC_KEY=' "$DEPLOY_PATH/.env" | cut -d= -f2- | base64 -d 2>/dev/null | wc -c)
+          [ "$klen" = "32" ] || { echo "::error::APP_SECRET_ENC_KEY 解碼後 ${klen} bytes，必須是 32"; exit 1; }
+          echo "  APP_SECRET_ENC_KEY 長度正確（32 bytes）"
 
       - name: 更新 compose 檔
         run: cp docker/docker-compose.prod.yml "$DEPLOY_PATH/docker-compose.yml"
