@@ -16,7 +16,16 @@ import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
+import org.springframework.security.web.csrf.CsrfFilter;
+import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
+import org.springframework.web.filter.OncePerRequestFilter;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+import java.io.IOException;
 import org.springframework.http.HttpStatus;
 
 /**
@@ -87,10 +96,11 @@ public class AdminSecurityConfig {
                 .userDetailsService(adminUserDetailsService)
                 .csrf(c -> c
                         .csrfTokenRepository(csrf)
-                        // Spring Security 6 預設延後解析 token，會讓第一次 GET
-                        // 拿不到 cookie。管理頁是單頁應用，載入後立刻要發請求，
-                        // 所以改回立即解析。
+                        // 用原始 token（非 XOR 遮罩版），前端才能直接把 cookie 值
+                        // 回填成 header/欄位
                         .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
+                // 見 CsrfCookieFilter 的說明：少了它，cookie 永遠不會被寫出
+                .addFilterAfter(new CsrfCookieFilter(), CsrfFilter.class)
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/admin/login", "/admin/login.html",
                                 "/admin/assets/**").permitAll()
@@ -111,5 +121,38 @@ public class AdminSecurityConfig {
                                 new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED),
                                 r -> r.getRequestURI().startsWith("/admin/api/")))
                 .build();
+    }
+
+    /**
+     * 強制把 CSRF token 寫進 cookie。
+     *
+     * <p><strong>沒有這個 filter，整個登入流程是壞的。</strong>
+     * Spring Security 6 的 {@code CsrfFilter} 改成<em>延遲</em>解析 token：
+     * token 只有在「真的有人去讀它」的時候才會產生，也才會被
+     * {@link CookieCsrfTokenRepository} 寫進回應的 cookie。
+     *
+     * <p>而我們的登入頁是<strong>靜態 HTML</strong>，沒有伺服器端樣板去讀
+     * {@code ${_csrf}}。於是 {@code GET /admin/login.html} 全程沒有人碰過 token，
+     * cookie 不會出現，前端的 JS 找不到值就不附 {@code _csrf}，
+     * {@code POST /admin/login} 一律 403。
+     *
+     * <p>症狀特別難查：帳密完全正確，回應卻是 403，而錯誤頁完全沒有提到 CSRF。
+     *
+     * <p>{@code getToken()} 這行看起來像沒有作用的呼叫，實際上正是它觸發
+     * token 產生與寫入 cookie。不要「清理」掉。
+     */
+    static final class CsrfCookieFilter extends OncePerRequestFilter {
+
+        @Override
+        protected void doFilterInternal(HttpServletRequest request,
+                                        HttpServletResponse response,
+                                        FilterChain chain) throws ServletException, IOException {
+
+            CsrfToken token = (CsrfToken) request.getAttribute(CsrfToken.class.getName());
+            if (token != null) {
+                token.getToken();
+            }
+            chain.doFilter(request, response);
+        }
     }
 }
