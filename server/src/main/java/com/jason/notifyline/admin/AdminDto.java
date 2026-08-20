@@ -1,9 +1,12 @@
 package com.jason.notifyline.admin;
 
 import com.jason.notifyline.client.Client;
+import com.jason.notifyline.client.ClientService;
 import com.jason.notifyline.client.Scope;
 import com.jason.notifyline.common.TargetType;
 import com.jason.notifyline.lineuser.LineUser;
+import com.jason.notifyline.notification.domain.Notification;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
@@ -90,5 +93,109 @@ public final class AdminDto {
             @Size(max = 500, message = "at most 500 userIds")
             List<@Pattern(regexp = "^U[0-9a-f]{32}$",
                     message = "must be a LINE user id") String> userIds) {
+    }
+
+    /** 建立憑證的種類。決定預設 scope 組合。 */
+    public enum ClientKind {
+        /** 後端服務，無綁定使用者，預設只能通知 owner。 */
+        SERVICE,
+        /** 管理者金鑰，擁有全部發送權限，需綁定 LINE user。 */
+        OWNER
+    }
+
+    /**
+     * 建立憑證的請求。
+     *
+     * @param lineUserId {@code kind = OWNER} 時必填
+     * @param dailyQuota null = 不限
+     */
+    public record CreateClientRequest(
+            @NotBlank(message = "name is required")
+            @Size(max = 100, message = "name must be at most 100 characters") String name,
+
+            ClientKind kind,
+
+            @Pattern(regexp = "^U[0-9a-f]{32}$", message = "must be a LINE user id")
+            String lineUserId,
+
+            Integer dailyQuota) {
+    }
+
+    /**
+     * 建立成功的回應。<strong>{@code secret} 是明文，只在這一刻存在。</strong>
+     * 前端顯示完就丟，不要存進任何地方。
+     */
+    public record CreatedClient(String clientId, String secret, List<String> scopes) {
+
+        public static CreatedClient from(ClientService.IssuedClient issued) {
+            return new CreatedClient(
+                    issued.clientId(),
+                    issued.secret(),
+                    issued.scopes().stream().map(Scope::value).sorted().toList());
+        }
+    }
+
+    /**
+     * 從後台直接發一則通知（測試用）。
+     *
+     * @param clientId 以哪組憑證的身分發送。決定 scope 與可用的預設對象
+     * @param type     null = 用該 client 的預設對象
+     * @param userIds  只有 {@code type = USER} 時才需要
+     */
+    public record SendTestRequest(
+            @NotBlank(message = "clientId is required") String clientId,
+
+            TargetType type,
+
+            @Size(max = 500, message = "at most 500 userIds")
+            List<@Pattern(regexp = "^U[0-9a-f]{32}$",
+                    message = "must be a LINE user id") String> userIds,
+
+            @Size(max = 100, message = "title must be at most 100 characters") String title,
+
+            @NotBlank(message = "text is required")
+            @Size(max = 5000, message = "text must be at most 5000 characters") String text) {
+    }
+
+    /** 切換 owner 標記。 */
+    public record SetOwnerRequest(boolean owner) {
+    }
+
+    /** 近期發送列表的一列。 */
+    public record NotificationSummary(
+            String notificationId,
+            String clientName,
+            String targetType,
+            String status,
+            int recipientCount,
+            int successCount,
+            int failureCount,
+            Instant createdAt,
+            Instant finishedAt) {
+
+        public static NotificationSummary from(Notification n, String clientName) {
+            return new NotificationSummary(
+                    n.getId().toString(),
+                    clientName,
+                    n.getTargetType().name(),
+                    n.getStatus().name(),
+                    n.getRecipientCount(),
+                    n.getSuccessCount(),
+                    n.getFailureCount(),
+                    n.getCreatedAt(),
+                    n.getFinishedAt());
+        }
+    }
+
+    /** 儀表板統計。 */
+    public record Stats(
+            long clientsTotal,
+            long clientsActive,
+            long usersActive,
+            long owners,
+            long notifications24h,
+            long succeeded24h,
+            long partial24h,
+            long failed24h) {
     }
 }

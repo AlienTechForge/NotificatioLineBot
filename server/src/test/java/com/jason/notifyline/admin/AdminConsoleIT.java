@@ -5,6 +5,8 @@ import com.jason.notifyline.client.ClientService;
 import com.jason.notifyline.common.TargetType;
 import com.jason.notifyline.lineuser.LineUser;
 import com.jason.notifyline.lineuser.LineUserRepository;
+import com.jason.notifyline.notification.domain.NotificationDeliveryRepository;
+import com.jason.notifyline.notification.domain.NotificationRepository;
 import com.jason.notifyline.support.PostgresIntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -23,6 +25,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -56,6 +60,10 @@ class AdminConsoleIT extends PostgresIntegrationTest {
     @Autowired
     private LineUserRepository lineUserRepository;
     @Autowired
+    private NotificationRepository notifications;
+    @Autowired
+    private NotificationDeliveryRepository deliveries;
+    @Autowired
     private Clock clock;
 
     private String clientId;
@@ -64,6 +72,9 @@ class AdminConsoleIT extends PostgresIntegrationTest {
 
     @BeforeEach
     void setUp() {
+        // notification 有 FK 指向 client，先清才能刪 client
+        deliveries.deleteAll();
+        notifications.deleteAll();
         clientRepository.deleteAll();
         lineUserRepository.deleteAll();
 
@@ -298,5 +309,133 @@ class AdminConsoleIT extends PostgresIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(defaultTargetBody("USER", "not-a-line-id")))
                 .andExpect(status().isBadRequest());
+    }
+
+    // ------------------------------------------------------------ 憑證 CRUD
+
+    @Test
+    @DisplayName("建立 SERVICE 憑證：201，回明文 secret 只此一次")
+    void createServiceClient() throws Exception {
+        mockMvc.perform(post("/admin/api/clients")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"ci\",\"kind\":\"SERVICE\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.clientId").value(org.hamcrest.Matchers.startsWith("cli_")))
+                .andExpect(jsonPath("$.data.secret").isNotEmpty())
+                .andExpect(jsonPath("$.data.scopes[0]").value("notify:owner"));
+    }
+
+    @Test
+    @DisplayName("建立 OWNER 憑證缺 lineUserId → 400")
+    void createOwnerClientWithoutUser() throws Exception {
+        mockMvc.perform(post("/admin/api/clients")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"admin\",\"kind\":\"OWNER\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("建立憑證未登入 → 401")
+    void createClientAnonymous() throws Exception {
+        mockMvc.perform(post("/admin/api/clients").with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"x\",\"kind\":\"SERVICE\"}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    @DisplayName("作廢憑證：狀態變 REVOKED")
+    void revokeClient() throws Exception {
+        mockMvc.perform(delete("/admin/api/clients/{id}", clientId)
+                        .with(admin()).with(csrf()))
+                .andExpect(status().isOk());
+        assertThat(clientRepository.findByClientId(clientId).orElseThrow().getStatus().name())
+                .isEqualTo("REVOKED");
+    }
+
+    @Test
+    @DisplayName("作廢未登入 → 401，且狀態不變")
+    void revokeAnonymous() throws Exception {
+        mockMvc.perform(delete("/admin/api/clients/{id}", clientId).with(csrf()))
+                .andExpect(status().isUnauthorized());
+        assertThat(clientRepository.findByClientId(clientId).orElseThrow().getStatus().name())
+                .isEqualTo("ACTIVE");
+    }
+
+    // ------------------------------------------------------------ 使用者 owner
+
+    @Test
+    @DisplayName("切換 owner")
+    void toggleOwner() throws Exception {
+        mockMvc.perform(put("/admin/api/line-users/{id}/owner", memberId)
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.owner").value(true));
+        assertThat(lineUserRepository.findById(memberId).orElseThrow().isOwner()).isTrue();
+    }
+
+    @Test
+    @DisplayName("對不存在的使用者設 owner → 400")
+    void setOwnerUnknownUser() throws Exception {
+        mockMvc.perform(put("/admin/api/line-users/{id}/owner", "U%032d".formatted(9))
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":true}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    // ------------------------------------------------------------ 儀表板 / 紀錄
+
+    @Test
+    @DisplayName("儀表板統計：未登入 401，登入回計數")
+    void statsRequireAuth() throws Exception {
+        mockMvc.perform(get("/admin/api/stats")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/admin/api/stats").with(admin()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.clientsTotal").isNumber())
+                .andExpect(jsonPath("$.data.usersActive").value(2));
+    }
+
+    @Test
+    @DisplayName("近期發送列表：未登入 401")
+    void recentRequiresAuth() throws Exception {
+        mockMvc.perform(get("/admin/api/notifications")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/admin/api/notifications").with(admin()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data").isArray());
+    }
+
+    // ------------------------------------------------------------ 後台發送
+
+    @Test
+    @DisplayName("後台發測試通知：202，寫入一筆 QUEUED")
+    void sendTest() throws Exception {
+        // 讓 clientId 這組 SERVICE 憑證有預設 OWNER 對象（回填 migration 已設，但測試自建的沒有）
+        mockMvc.perform(put("/admin/api/clients/{id}/default-target", clientId)
+                .with(admin()).with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(defaultTargetBody("OWNER")));
+
+        String body = "{\"clientId\":\"" + clientId + "\",\"text\":\"後台測試\"}";
+        mockMvc.perform(post("/admin/api/notifications/test")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.data.status").value("QUEUED"))
+                .andExpect(jsonPath("$.data.recipientCount").value(1));
+    }
+
+    @Test
+    @DisplayName("後台發送未登入 → 401")
+    void sendTestAnonymous() throws Exception {
+        mockMvc.perform(post("/admin/api/notifications/test").with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"clientId\":\"x\",\"text\":\"y\"}"))
+                .andExpect(status().isUnauthorized());
     }
 }

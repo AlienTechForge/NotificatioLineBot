@@ -15,4 +15,7 @@ public interface LineUserRepository extends JpaRepository<LineUser, String> {
     List<LineUser> findByLineUserIdInAndStatus(List<String> lineUserIds, LineUserStatus status);
 
     long countByStatus(LineUserStatus status);
+
+    /** 儀表板：目前的 owner 數。 */
+    long countByOwnerTrueAndStatus(LineUserStatus status);
 }
