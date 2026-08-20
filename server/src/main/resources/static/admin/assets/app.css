@@ -69,6 +69,10 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
+/* [hidden] 的 display:none 是 UA 層級，會被任何設了 display 的 class 蓋掉
+   （.notice{display:flex} 就把 hidden 的錯誤框顯示出來）。強制讓 hidden 贏。 */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
