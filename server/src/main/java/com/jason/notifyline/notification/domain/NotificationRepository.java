@@ -1,5 +1,6 @@
 package com.jason.notifyline.notification.domain;
 
+import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -14,6 +15,15 @@ public interface NotificationRepository extends JpaRepository<Notification, UUID
 
     /** 冪等查詢。範圍是 (client, key)，不同 client 用相同 key 不衝突。 */
     Optional<Notification> findByClientIdAndIdempotencyKey(Long clientId, String idempotencyKey);
+
+    /** 管理台的近期發送列表，最新在前。跨所有 client（管理者看得到全部）。 */
+    List<Notification> findAllByOrderByCreatedAtDesc(Limit limit);
+
+    /** 儀表板：指定時間之後的發送筆數。 */
+    long countByCreatedAtGreaterThanEqual(Instant since);
+
+    /** 儀表板：指定時間之後、某狀態的發送筆數。 */
+    long countByStatusAndCreatedAtGreaterThanEqual(NotificationStatus status, Instant since);
 
     /**
      * 冪等寫入。<strong>不可以改用 {@code save()}。</strong>

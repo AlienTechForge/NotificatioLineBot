@@ -9,138 +9,249 @@
 </head>
 <body>
 
-<header class="masthead">
-    <div class="masthead__inner">
-        <h1 class="wordmark">NotifyLine <span>Admin</span></h1>
-        <div class="masthead__spacer"></div>
-        <form method="post" action="/admin/logout" id="logoutForm">
-            <button type="submit" class="btn btn--sm">
-                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
-                </svg>
-                登出
+<div class="app">
+    <aside class="sidebar">
+        <div class="brand"><span class="dot" aria-hidden="true"></span>NotifyLine <span>Admin</span></div>
+
+        <nav class="nav" aria-label="主導覽">
+            <a href="#dashboard" data-view="dashboard" aria-current="page">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+                <span class="label">總覽</span>
+            </a>
+            <a href="#clients" data-view="clients">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M21 2l-2 2m-7.6 7.6a5 5 0 1 1-7.1 7.1 5 5 0 0 1 7.1-7.1zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                <span class="label">憑證</span>
+            </a>
+            <a href="#send" data-view="send">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                <span class="label">發送</span>
+            </a>
+            <a href="#history" data-view="history">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 8v4l3 2M3.05 11a9 9 0 1 1 .5 4M3 4v5h5"/></svg>
+                <span class="label">紀錄</span>
+            </a>
+            <a href="#users" data-view="users">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm14 10v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></svg>
+                <span class="label">使用者</span>
+            </a>
+        </nav>
+
+        <div class="sidebar__foot">
+            <form method="post" action="/admin/logout" id="logoutForm">
+                <button type="submit" class="btn btn--sm" style="width:100%">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+                    登出
+                </button>
+            </form>
+        </div>
+    </aside>
+
+    <div class="main">
+        <header class="topbar">
+            <div>
+                <h1 id="viewTitle">總覽</h1>
+                <p id="viewSubtitle">服務狀態一覽</p>
+            </div>
+            <button type="button" class="btn btn--sm" id="refresh">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
+                重新整理
             </button>
-        </form>
+        </header>
+
+        <main class="content">
+            <div id="pageError" class="notice notice--error" role="alert" hidden></div>
+
+            <!-- 總覽 -->
+            <section class="view" id="view-dashboard" aria-label="總覽">
+                <div class="stat-grid" id="statGrid"></div>
+                <div class="card">
+                    <div class="card__head"><div><h2>近期發送</h2><p>最新 10 筆</p></div>
+                        <a href="#history" class="btn btn--sm btn--ghost" data-view="history">看全部</a></div>
+                    <div class="table-wrap"><table class="grid" id="dashRecent"><tbody></tbody></table></div>
+                </div>
+            </section>
+
+            <!-- 憑證 -->
+            <section class="view" id="view-clients" aria-label="憑證" hidden>
+                <div class="card">
+                    <div class="card__head">
+                        <div><h2>憑證</h2><p>建立、作廢、設定每組憑證的預設通知對象</p></div>
+                        <button type="button" class="btn btn--primary btn--sm" id="newClientBtn">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                            建立憑證
+                        </button>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="grid">
+                            <thead><tr>
+                                <th>憑證</th><th>狀態</th><th>預設通知對象</th><th>Scope</th><th><span class="visually-hidden">操作</span></th>
+                            </tr></thead>
+                            <tbody id="clientRows"></tbody>
+                        </table>
+                    </div>
+                    <div id="clientsEmpty" class="empty" hidden>還沒有任何憑證。點右上角建立第一組。</div>
+                </div>
+            </section>
+
+            <!-- 發送 -->
+            <section class="view" id="view-send" aria-label="發送" hidden>
+                <div class="card" style="max-width:640px">
+                    <div class="card__head"><div><h2>發送測試通知</h2><p>以選定憑證的身分發出，權限與白名單和正式 API 完全一致</p></div></div>
+                    <form id="sendForm" class="dialog__body">
+                        <div id="sendError" class="notice notice--error" role="alert" hidden></div>
+                        <div id="sendOk" class="notice notice--success" role="status" hidden></div>
+
+                        <div class="field">
+                            <label for="sendClient">以哪組憑證發送</label>
+                            <select id="sendClient" required></select>
+                            <p class="hint">只列出 ACTIVE 的憑證。</p>
+                        </div>
+
+                        <fieldset class="field">
+                            <legend class="fieldset-label">通知對象</legend>
+                            <div class="choices">
+                                <label class="choice"><input type="radio" name="sendType" value=""><span><span class="choice__title">用憑證的預設對象</span><span class="choice__desc">沒設預設對象會回 400。</span></span></label>
+                                <label class="choice"><input type="radio" name="sendType" value="OWNER"><span><span class="choice__title">管理者（OWNER）</span></span></label>
+                                <label class="choice"><input type="radio" name="sendType" value="SELF"><span><span class="choice__title">綁定的使用者（SELF）</span></span></label>
+                                <label class="choice"><input type="radio" name="sendType" value="ALL"><span><span class="choice__title">全體好友（ALL）</span></span></label>
+                                <label class="choice"><input type="radio" name="sendType" value="USER"><span><span class="choice__title">指定使用者</span></span></label>
+                            </div>
+                            <div id="sendUserPickerField" hidden>
+                                <p class="fieldset-label" id="sendUserLabel" style="margin-top:var(--sp-3)">收件人</p>
+                                <div class="user-picker" id="sendUserPicker" role="group" aria-labelledby="sendUserLabel"></div>
+                            </div>
+                        </fieldset>
+
+                        <div class="field">
+                            <label for="sendTitle">標題（選填）</label>
+                            <input type="text" id="sendTitle" maxlength="100" placeholder="例如：部署完成">
+                        </div>
+                        <div class="field">
+                            <label for="sendText">內容</label>
+                            <textarea id="sendText" required maxlength="5000" placeholder="輸入訊息內容…"></textarea>
+                            <p class="hint">含連結時，網域必須在伺服器白名單內，否則回 400。</p>
+                        </div>
+
+                        <button type="submit" class="btn btn--primary" id="sendSubmit">送出</button>
+                    </form>
+                </div>
+            </section>
+
+            <!-- 紀錄 -->
+            <section class="view" id="view-history" aria-label="發送紀錄" hidden>
+                <div class="card">
+                    <div class="card__head"><div><h2>發送紀錄</h2><p>最新 100 筆。點列查看批次明細</p></div></div>
+                    <div class="table-wrap">
+                        <table class="grid">
+                            <thead><tr>
+                                <th>時間</th><th>憑證</th><th>對象</th><th>狀態</th><th class="num">收件</th><th class="num">成功/失敗</th>
+                            </tr></thead>
+                            <tbody id="historyRows"></tbody>
+                        </table>
+                    </div>
+                    <div id="historyEmpty" class="empty" hidden>還沒有任何發送紀錄。</div>
+                </div>
+            </section>
+
+            <!-- 使用者 -->
+            <section class="view" id="view-users" aria-label="使用者" hidden>
+                <div class="card">
+                    <div class="card__head"><div><h2>LINE 使用者</h2><p>切換誰是 owner（target=OWNER 的收件人）</p></div></div>
+                    <div class="table-wrap">
+                        <table class="grid">
+                            <thead><tr><th>使用者</th><th>User ID</th><th>Owner</th><th><span class="visually-hidden">操作</span></th></tr></thead>
+                            <tbody id="userRows"></tbody>
+                        </table>
+                    </div>
+                    <div id="usersEmpty" class="empty" hidden>還沒有任何 ACTIVE 使用者。請對方先加 Bot 好友。</div>
+                </div>
+            </section>
+        </main>
     </div>
-</header>
+</div>
 
-<main class="shell" id="main">
-    <div class="page-head">
-        <div>
-            <h2>預設通知對象</h2>
-            <p>
-                設定每組憑證在請求未帶 <code>target</code> 時要通知誰。
-                這裡指定的收件人<strong>不需要對應的 scope</strong> ——
-                授權行為是你做的，不是呼叫端自己宣稱的。
-            </p>
-        </div>
-        <button type="button" class="btn btn--sm" id="refresh">
-            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-                <path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/>
-            </svg>
-            重新整理
-        </button>
-    </div>
-
-    <div id="pageError" class="notice notice--error" role="alert" hidden></div>
-
-    <section class="card" aria-labelledby="clientsHeading">
-        <h3 id="clientsHeading" class="visually-hidden">憑證清單</h3>
-
-        <div id="loading" class="loading">載入中…</div>
-
-        <div class="table-wrap" id="tableWrap" hidden>
-            <table class="clients">
-                <thead>
-                <tr>
-                    <th scope="col">憑證</th>
-                    <th scope="col">狀態</th>
-                    <th scope="col">預設通知對象</th>
-                    <th scope="col">Scope</th>
-                    <th scope="col"><span class="visually-hidden">操作</span></th>
-                </tr>
-                </thead>
-                <tbody id="clientRows"></tbody>
-            </table>
-        </div>
-
-        <div id="empty" class="empty" hidden>
-            還沒有任何憑證。用 GitHub Actions 的 <strong>Admin</strong> workflow 建立一組。
-        </div>
-    </section>
-</main>
-
-<!-- 編輯對話框。原生 <dialog> 自帶焦點陷阱與 Esc 關閉。 -->
-<dialog id="editDialog" aria-labelledby="dialogTitle">
-    <form method="dialog" id="editForm">
-        <div class="dialog__head">
-            <h3 id="dialogTitle">設定預設通知對象</h3>
-            <p id="dialogSubtitle"></p>
-        </div>
-
+<!-- 設定預設對象 -->
+<dialog id="targetDialog" aria-labelledby="targetTitle">
+    <form method="dialog" id="targetForm">
+        <div class="dialog__head"><h3 id="targetTitle">設定預設通知對象</h3><p id="targetSubtitle"></p></div>
         <div class="dialog__body">
-            <div id="dialogError" class="notice notice--error" role="alert" hidden></div>
-
+            <div id="targetError" class="notice notice--error" role="alert" hidden></div>
             <fieldset>
                 <legend class="fieldset-label">通知對象</legend>
                 <div class="choices">
-                    <label class="choice">
-                        <input type="radio" name="targetType" value="OWNER">
-                        <span>
-                            <span class="choice__title">管理者（OWNER）</span>
-                            <span class="choice__desc">所有標記為 owner 且仍是好友的使用者。最常見的選擇。</span>
-                        </span>
-                    </label>
-
-                    <label class="choice">
-                        <input type="radio" name="targetType" value="USER">
-                        <span>
-                            <span class="choice__title">指定使用者</span>
-                            <span class="choice__desc">從下方清單挑選。不需要授予 notify:user。</span>
-                        </span>
-                    </label>
-
-                    <label class="choice">
-                        <input type="radio" name="targetType" value="SELF">
-                        <span>
-                            <span class="choice__title">綁定的使用者（SELF）</span>
-                            <span class="choice__desc">只適用於綁定了 LINE 使用者的憑證。</span>
-                        </span>
-                    </label>
-
-                    <label class="choice">
-                        <input type="radio" name="targetType" value="ALL">
-                        <span>
-                            <span class="choice__title">全體好友（ALL）</span>
-                            <span class="choice__desc">所有仍是好友的使用者。會消耗大量 LINE 月額度。</span>
-                        </span>
-                    </label>
-
-                    <label class="choice">
-                        <input type="radio" name="targetType" value="">
-                        <span>
-                            <span class="choice__title">不設定</span>
-                            <span class="choice__desc">該憑證每次請求都必須自己帶 target，否則回 400。</span>
-                        </span>
-                    </label>
+                    <label class="choice"><input type="radio" name="targetType" value="OWNER"><span><span class="choice__title">管理者（OWNER）</span><span class="choice__desc">所有 owner 且仍是好友的人。最常見。</span></span></label>
+                    <label class="choice"><input type="radio" name="targetType" value="USER"><span><span class="choice__title">指定使用者</span><span class="choice__desc">從下方勾選。不需要授予 notify:user。</span></span></label>
+                    <label class="choice"><input type="radio" name="targetType" value="SELF"><span><span class="choice__title">綁定的使用者（SELF）</span></span></label>
+                    <label class="choice"><input type="radio" name="targetType" value="ALL"><span><span class="choice__title">全體好友（ALL）</span></span></label>
+                    <label class="choice"><input type="radio" name="targetType" value=""><span><span class="choice__title">不設定</span><span class="choice__desc">該憑證每次都要自己帶 target。</span></span></label>
                 </div>
             </fieldset>
-
-            <div id="userPickerField" hidden>
-                <p class="fieldset-label" id="userPickerLabel">收件人</p>
-                <div class="user-picker" id="userPicker" role="group" aria-labelledby="userPickerLabel"></div>
-                <p class="hint" id="userPickerHint">已選 0 人。</p>
+            <div id="targetUserField" hidden>
+                <p class="fieldset-label" id="targetUserLabel" style="margin-top:var(--sp-3)">收件人</p>
+                <div class="user-picker" id="targetUserPicker" role="group" aria-labelledby="targetUserLabel"></div>
+                <p class="hint" id="targetUserHint">已選 0 人。</p>
             </div>
         </div>
-
         <div class="dialog__foot">
-            <button type="button" class="btn" id="cancelBtn">取消</button>
-            <button type="submit" class="btn btn--primary" id="saveBtn">儲存</button>
+            <button type="button" class="btn" id="targetCancel">取消</button>
+            <button type="submit" class="btn btn--primary" id="targetSave">儲存</button>
         </div>
     </form>
 </dialog>
 
-<!-- aria-live 讓儲存結果被讀出，但不搶走焦點 -->
+<!-- 建立憑證 -->
+<dialog id="createDialog" aria-labelledby="createTitle">
+    <form method="dialog" id="createForm">
+        <div class="dialog__head"><h3 id="createTitle">建立憑證</h3></div>
+        <div class="dialog__body">
+            <div id="createError" class="notice notice--error" role="alert" hidden></div>
+            <div class="field">
+                <label for="createName">名稱</label>
+                <input type="text" id="createName" required maxlength="100" placeholder="例如：ci-runner">
+            </div>
+            <fieldset class="field">
+                <legend class="fieldset-label">種類</legend>
+                <div class="choices">
+                    <label class="choice"><input type="radio" name="createKind" value="SERVICE" checked><span><span class="choice__title">SERVICE</span><span class="choice__desc">後端服務，預設只能通知 owner。多數情況選這個。</span></span></label>
+                    <label class="choice"><input type="radio" name="createKind" value="OWNER"><span><span class="choice__title">OWNER</span><span class="choice__desc">全部發送權限，需綁定一個 LINE 使用者。</span></span></label>
+                </div>
+            </fieldset>
+            <div class="field" id="createUserField" hidden>
+                <label for="createUser">綁定使用者</label>
+                <select id="createUser"></select>
+            </div>
+            <div class="field">
+                <label for="createQuota">每日收件人配額（選填）</label>
+                <input type="number" id="createQuota" min="1" placeholder="留空 = 不限">
+            </div>
+        </div>
+        <div class="dialog__foot">
+            <button type="button" class="btn" id="createCancel">取消</button>
+            <button type="submit" class="btn btn--primary" id="createSubmit">建立</button>
+        </div>
+    </form>
+</dialog>
+
+<!-- 顯示新 secret（只一次） -->
+<dialog id="secretDialog" aria-labelledby="secretTitle">
+    <div class="dialog__head"><h3 id="secretTitle">憑證已建立</h3><p>secret 只顯示這一次，關掉就再也拿不到。立刻複製並存進密碼管理器。</p></div>
+    <div class="dialog__body">
+        <div class="field"><label>Client ID</label><div class="secret-box" id="newClientId"></div></div>
+        <div class="field"><label>Secret</label><div class="secret-box" id="newSecret"></div></div>
+    </div>
+    <div class="dialog__foot">
+        <button type="button" class="btn" id="copySecret">複製兩者</button>
+        <button type="button" class="btn btn--primary" id="secretClose">我已存好</button>
+    </div>
+</dialog>
+
+<!-- 批次明細 -->
+<dialog id="detailDialog" aria-labelledby="detailTitle">
+    <div class="dialog__head"><h3 id="detailTitle">發送明細</h3><p id="detailSubtitle"></p></div>
+    <div class="dialog__body"><div id="detailBody"></div></div>
+    <div class="dialog__foot"><button type="button" class="btn btn--primary" id="detailClose">關閉</button></div>
+</dialog>
+
 <div class="toast" id="toast" aria-live="polite" aria-atomic="false"></div>
 
 <script src="/admin/assets/app.js"></script>
