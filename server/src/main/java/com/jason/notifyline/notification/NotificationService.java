@@ -93,6 +93,24 @@ public class NotificationService {
                                        byte[] rawBody,
                                        String idempotencyKey,
                                        String requestId) {
+        return submit(principal, request, rawBody, idempotencyKey, requestId, null);
+    }
+
+    /**
+     * @param rawBody        呼叫端<strong>實際簽章的那串位元組</strong>，用來算 payload hash
+     * @param idempotencyKey 可為 null
+     * @param requestId      correlation id，串起同步段與非同步段的日誌
+     * @param scheduledAt    null = 立即發送；非 null = 排到該時間點才由派送器取件。
+     *                       必須晚於現在，呼叫端（目前只有管理台）負責驗證 —— 這裡不重複檢查，
+     *                       因為「多晚算合理」是管理操作的政策問題，不是這個方法該管的
+     */
+    @Transactional
+    public NotificationAccepted submit(ClientPrincipal principal,
+                                       NotificationRequest request,
+                                       byte[] rawBody,
+                                       String idempotencyKey,
+                                       String requestId,
+                                       Instant scheduledAt) {
 
         byte[] payloadHash = sha256(rawBody);
 
@@ -137,7 +155,8 @@ public class NotificationService {
                 payloadHash,
                 NotificationStatus.QUEUED.name(),
                 recipientCount,
-                now);
+                now,
+                scheduledAt);
 
         if (inserted == 0) {
             // 另一個併發請求帶著同一把 key 先寫進去了。ON CONFLICT DO NOTHING
@@ -149,11 +168,17 @@ public class NotificationService {
             return replay(winner, payloadHash, idempotencyKey);
         }
 
-        persistBatches(id, batches, effectiveType, now);
-        kickAfterCommit();
+        persistBatches(id, batches, effectiveType, now, scheduledAt);
 
-        log.info("受理通知：notificationId={} target={} recipients={} batches={} client={}",
-                id, effectiveType, recipientCount, batches.size(), principal.clientId());
+        // 排到未來的不必立刻踢派送 —— 就算踢了，dispatcher 的取件 SQL
+        // 也會因為 next_attempt_at 還沒到而撿不到它，白跑一趟。
+        boolean dueNow = scheduledAt == null || !scheduledAt.isAfter(now);
+        if (dueNow) {
+            kickAfterCommit();
+        }
+
+        log.info("受理通知：notificationId={} target={} recipients={} batches={} client={} scheduledAt={}",
+                id, effectiveType, recipientCount, batches.size(), principal.clientId(), scheduledAt);
 
         return new NotificationAccepted(
                 id, NotificationStatus.QUEUED.name(), recipientCount, batches.size());
@@ -237,10 +262,11 @@ public class NotificationService {
     private void persistBatches(UUID notificationId,
                                 List<List<String>> batches,
                                 TargetType targetType,
-                                Instant now) {
+                                Instant now,
+                                Instant scheduledAt) {
         List<NotificationDelivery> rows = new ArrayList<>(batches.size());
         for (int i = 0; i < batches.size(); i++) {
-            rows.add(new NotificationDelivery(
+            NotificationDelivery delivery = new NotificationDelivery(
                     notificationId,
                     i,
                     batches.get(i),
@@ -248,7 +274,14 @@ public class NotificationService {
                     // 它們對 LINE 而言是不同的訊息。
                     UUID.randomUUID(),
                     targetType.priority(),
-                    now));
+                    now);
+            if (scheduledAt != null && scheduledAt.isAfter(now)) {
+                // 沿用既有的租約機制把首次嘗試時間推到排程時間 —— 不需要
+                // 另一條「排程派送」路徑，dispatcher 的 pending+due 取件邏輯
+                // 原封不動適用。
+                delivery.lease(scheduledAt);
+            }
+            rows.add(delivery);
         }
         deliveries.saveAll(rows);
     }
