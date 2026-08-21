@@ -149,6 +149,14 @@ class DeliveryDispatchIT extends PostgresIntegrationTest {
                 text.getBytes(StandardCharsets.UTF_8), null, UUID.randomUUID().toString());
     }
 
+    private NotificationAccepted submitScheduled(TargetType type, String text, java.time.Instant scheduledAt) {
+        NotificationRequest request = new NotificationRequest(
+                new NotificationRequest.Target(type, null),
+                new NotificationRequest.Message(null, text), null, null);
+        return notificationService.submit(principal, request,
+                text.getBytes(StandardCharsets.UTF_8), null, UUID.randomUUID().toString(), scheduledAt);
+    }
+
     // ------------------------------------------------------------ 成功路徑
 
     @Test
@@ -340,6 +348,37 @@ class DeliveryDispatchIT extends PostgresIntegrationTest {
         var delivery = deliveries.findAll().getFirst();
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorCode()).isEqualTo("PAYLOAD_GONE");
+    }
+
+    // ------------------------------------------------------------ 排程
+
+    @Test
+    @DisplayName("排到未來的通知，派送器取件不到，完全不會打去 LINE")
+    void scheduledBatchNotClaimedBeforeDue() throws Exception {
+        // 刻意不 enqueue 任何回應 —— 如果 claim() 有 bug 把它取走去送，
+        // LineMulticastClient 連不到樁伺服器，測試會用逾時／連線錯誤失敗，
+        // 而不是安靜地吃掉一個本來要給別的測試用的回應（那種洩漏會讓
+        // 後面完全無關的測試跟著莫名其妙地失敗）。
+        submitScheduled(TargetType.OWNER, "x", clock.instant().plusSeconds(3600));
+
+        assertThat(dispatcher.runOnce()).isZero();
+        assertThat(deliveries.findAll().getFirst().getStatus()).isEqualTo(DeliveryStatus.PENDING);
+        assertThat(LINE.takeRequest(200, java.util.concurrent.TimeUnit.MILLISECONDS)).isNull();
+    }
+
+    @Test
+    @DisplayName("排程時間一到，跟立即發送走同一條取件邏輯，正常送出")
+    void scheduledBatchSentOnceDue() throws Exception {
+        LINE.enqueue(ok("req-scheduled"));
+        var accepted = submitScheduled(TargetType.OWNER, "x", clock.instant().plusSeconds(3600));
+
+        assertThat(dispatcher.runOnce()).isZero();
+
+        forceDue();
+        assertThat(dispatcher.runOnce()).isEqualTo(1);
+
+        var notification = notifications.findById(accepted.notificationId()).orElseThrow();
+        assertThat(notification.getStatus()).isEqualTo(NotificationStatus.SUCCEEDED);
     }
 
     // ------------------------------------------------------- persistPayload

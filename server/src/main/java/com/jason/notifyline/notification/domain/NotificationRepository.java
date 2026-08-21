@@ -26,6 +26,17 @@ public interface NotificationRepository extends JpaRepository<Notification, UUID
     long countByStatusAndCreatedAtGreaterThanEqual(NotificationStatus status, Instant since);
 
     /**
+     * 管理台「排程」頁：還沒到派送時間的排程通知，最快到期的排前面。
+     *
+     * <p>{@code status = QUEUED} 而不只看 {@code scheduled_at}：一旦派送器把它取走，
+     * {@code markSending} 會把狀態轉成 SENDING，此時它已經在送出的路上，
+     * 不該再出現在「可以取消」的清單裡。取消動作（{@code AdminService#cancelScheduled}）
+     * 用同一個 {@code status == QUEUED} 判斷擋掉「已經在送」的情況。
+     */
+    List<Notification> findByScheduledAtIsNotNullAndStatusOrderByScheduledAtAsc(
+            NotificationStatus status, Limit limit);
+
+    /**
      * 冪等寫入。<strong>不可以改用 {@code save()}。</strong>
      *
      * <p>{@code notification.id} 是應用程式自己產生的 UUID，所以 Spring Data 的
@@ -49,11 +60,11 @@ public interface NotificationRepository extends JpaRepository<Notification, UUID
             INSERT INTO notification (
                 id, client_id, idempotency_key, request_id, target_type,
                 payload, payload_hash, status,
-                recipient_count, success_count, failure_count, created_at)
+                recipient_count, success_count, failure_count, created_at, scheduled_at)
             VALUES (
                 :id, :clientId, :idempotencyKey, :requestId, :targetType,
                 CAST(:payload AS jsonb), :payloadHash, :status,
-                :recipientCount, 0, 0, :createdAt)
+                :recipientCount, 0, 0, :createdAt, :scheduledAt)
             ON CONFLICT (client_id, idempotency_key) WHERE idempotency_key IS NOT NULL
             DO NOTHING
             """, nativeQuery = true)
@@ -66,7 +77,8 @@ public interface NotificationRepository extends JpaRepository<Notification, UUID
                        @Param("payloadHash") byte[] payloadHash,
                        @Param("status") String status,
                        @Param("recipientCount") int recipientCount,
-                       @Param("createdAt") Instant createdAt);
+                       @Param("createdAt") Instant createdAt,
+                       @Param("scheduledAt") Instant scheduledAt);
 
     /** 查詢 API 只能看自己的，否則回 404（不洩漏該 id 是否存在）。 */
     Optional<Notification> findByIdAndClientId(UUID id, Long clientId);
