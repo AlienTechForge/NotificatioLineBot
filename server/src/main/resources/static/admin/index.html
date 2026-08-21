@@ -26,6 +26,10 @@
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
                 <span class="label">發送</span>
             </a>
+            <a href="#scheduled" data-view="scheduled">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+                <span class="label">排程</span>
+            </a>
             <a href="#history" data-view="history">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 8v4l3 2M3.05 11a9 9 0 1 1 .5 4M3 4v5h5"/></svg>
                 <span class="label">紀錄</span>
@@ -64,6 +68,10 @@
             <!-- 總覽 -->
             <section class="view" id="view-dashboard" aria-label="總覽">
                 <div class="stat-grid" id="statGrid"></div>
+                <div class="card" id="quotaCard" style="margin-bottom:var(--sp-5)">
+                    <div class="card__head"><div><h2>LINE 月配額</h2><p id="quotaSub">載入中…</p></div></div>
+                    <div class="dialog__body" id="quotaBody" style="padding:var(--sp-4) var(--sp-5)"></div>
+                </div>
                 <div class="card">
                     <div class="card__head"><div><h2>近期發送</h2><p>最新 10 筆</p></div>
                         <a href="#history" class="btn btn--sm btn--ghost" data-view="history">看全部</a></div>
@@ -132,8 +140,35 @@
                             <p class="hint">含連結時，網域必須在伺服器白名單內，否則回 400。</p>
                         </div>
 
+                        <fieldset class="field">
+                            <legend class="fieldset-label">發送時機</legend>
+                            <div class="choices">
+                                <label class="choice"><input type="radio" name="sendWhen" value="now" checked><span><span class="choice__title">立即發送</span></span></label>
+                                <label class="choice"><input type="radio" name="sendWhen" value="later"><span><span class="choice__title">排程</span><span class="choice__desc">到「排程」頁可以查看、取消。</span></span></label>
+                            </div>
+                            <div id="sendScheduleField" hidden style="margin-top:var(--sp-3)">
+                                <label for="sendScheduleAt">時間（本機時區）</label>
+                                <input type="datetime-local" id="sendScheduleAt">
+                                <p class="hint">至少 30 秒後，最遠一年內。</p>
+                            </div>
+                        </fieldset>
+
                         <button type="submit" class="btn btn--primary" id="sendSubmit">送出</button>
                     </form>
+                </div>
+            </section>
+
+            <!-- 排程 -->
+            <section class="view" id="view-scheduled" aria-label="排程" hidden>
+                <div class="card">
+                    <div class="card__head"><div><h2>排程中</h2><p>還沒到派送時間，可以取消</p></div></div>
+                    <div class="table-wrap">
+                        <table class="grid">
+                            <thead><tr><th>預計發送</th><th>憑證</th><th>對象</th><th class="num">收件</th><th><span class="visually-hidden">操作</span></th></tr></thead>
+                            <tbody id="scheduledRows"></tbody>
+                        </table>
+                    </div>
+                    <div id="scheduledEmpty" class="empty" hidden>目前沒有排程中的通知。到「發送」頁選「排程」建立一筆。</div>
                 </div>
             </section>
 

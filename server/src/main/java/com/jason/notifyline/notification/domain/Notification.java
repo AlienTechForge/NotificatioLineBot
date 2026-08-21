@@ -80,6 +80,10 @@ public class Notification {
     @Column(name = "finished_at")
     private Instant finishedAt;
 
+    /** null = 立即發送。見 {@code V3__scheduled_send.sql} 的說明。 */
+    @Column(name = "scheduled_at")
+    private Instant scheduledAt;
+
     protected Notification() {
         // JPA
     }
@@ -92,7 +96,8 @@ public class Notification {
                         String payload,
                         byte[] payloadHash,
                         int recipientCount,
-                        Instant now) {
+                        Instant now,
+                        Instant scheduledAt) {
         this.id = id;
         this.clientId = clientId;
         this.idempotencyKey = idempotencyKey;
@@ -103,6 +108,7 @@ public class Notification {
         this.recipientCount = recipientCount;
         this.status = NotificationStatus.QUEUED;
         this.createdAt = now;
+        this.scheduledAt = scheduledAt;
     }
 
     // ------------------------------------------------------------- 狀態轉換
@@ -189,6 +195,15 @@ public class Notification {
 
     public Instant getFinishedAt() {
         return finishedAt;
+    }
+
+    public Instant getScheduledAt() {
+        return scheduledAt;
+    }
+
+    /** 還沒到派送時間的排程通知：有排程、還沒開始送。 */
+    public boolean isPendingSchedule() {
+        return scheduledAt != null && status == NotificationStatus.QUEUED;
     }
 
     /** 不輸出 payload —— 內容可能含呼叫端誤送的機密。 */

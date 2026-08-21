@@ -136,11 +136,13 @@ public final class AdminDto {
     }
 
     /**
-     * 從後台直接發一則通知（測試用）。
+     * 從後台直接發一則通知，或排到未來某個時間點發送。
      *
-     * @param clientId 以哪組憑證的身分發送。決定 scope 與可用的預設對象
-     * @param type     null = 用該 client 的預設對象
-     * @param userIds  只有 {@code type = USER} 時才需要
+     * @param clientId    以哪組憑證的身分發送。決定 scope 與可用的預設對象
+     * @param type        null = 用該 client 的預設對象
+     * @param userIds     只有 {@code type = USER} 時才需要
+     * @param scheduledAt null = 立即發送；非 null = 排到該時間點才由派送器取件，
+     *                    必須晚於現在（見 {@code AdminService} 的驗證與可接受的上限）
      */
     public record SendTestRequest(
             @NotBlank(message = "clientId is required") String clientId,
@@ -154,14 +156,21 @@ public final class AdminDto {
             @Size(max = 100, message = "title must be at most 100 characters") String title,
 
             @NotBlank(message = "text is required")
-            @Size(max = 5000, message = "text must be at most 5000 characters") String text) {
+            @Size(max = 5000, message = "text must be at most 5000 characters") String text,
+
+            Instant scheduledAt) {
     }
 
     /** 切換 owner 標記。 */
     public record SetOwnerRequest(boolean owner) {
     }
 
-    /** 近期發送列表的一列。 */
+    /**
+     * 近期發送列表的一列。
+     *
+     * @param scheduledAt null = 這是一則立即發送的通知；非 null = 排程，
+     *                    值是預計派送器取件的時間
+     */
     public record NotificationSummary(
             String notificationId,
             String clientName,
@@ -171,7 +180,8 @@ public final class AdminDto {
             int successCount,
             int failureCount,
             Instant createdAt,
-            Instant finishedAt) {
+            Instant finishedAt,
+            Instant scheduledAt) {
 
         public static NotificationSummary from(Notification n, String clientName) {
             return new NotificationSummary(
@@ -183,7 +193,8 @@ public final class AdminDto {
                     n.getSuccessCount(),
                     n.getFailureCount(),
                     n.getCreatedAt(),
-                    n.getFinishedAt());
+                    n.getFinishedAt(),
+                    n.getScheduledAt());
         }
     }
 
@@ -197,5 +208,53 @@ public final class AdminDto {
             long succeeded24h,
             long partial24h,
             long failed24h) {
+    }
+
+    /**
+     * LINE 官方帳號的月訊息配額用量。
+     *
+     * @param available   false 代表拿不到（呼叫失敗、逾時、或方案本身不限量）——
+     *                    這種情況下其餘欄位一律是 null，前端要能處理「沒有這個資訊」
+     * @param unlimited   true 代表這個方案沒有月上限（LINE 的 {@code type=none}）
+     * @param limit       月上限則數。{@code unlimited=true} 或 {@code available=false} 時為 null
+     * @param used        本月已用則數
+     * @param remaining   {@code limit - used}，可能為負（LINE 端的用量與我方查詢有些微延遲）
+     */
+    public record LineQuota(
+            boolean available,
+            boolean unlimited,
+            Long limit,
+            Long used,
+            Long remaining) {
+
+        public static LineQuota unavailable() {
+            return new LineQuota(false, false, null, null, null);
+        }
+
+        public static LineQuota unlimitedPlan(long used) {
+            return new LineQuota(true, true, null, used, null);
+        }
+
+        public static LineQuota of(long limit, long used) {
+            return new LineQuota(true, false, limit, used, limit - used);
+        }
+    }
+
+    /** 排到未來時間的通知。取消需要 {@code notificationId}。 */
+    public record ScheduledNotification(
+            String notificationId,
+            String clientName,
+            String targetType,
+            int recipientCount,
+            Instant scheduledAt) {
+
+        public static ScheduledNotification from(Notification n, String clientName) {
+            return new ScheduledNotification(
+                    n.getId().toString(),
+                    clientName,
+                    n.getTargetType().name(),
+                    n.getRecipientCount(),
+                    n.getScheduledAt());
+        }
     }
 }

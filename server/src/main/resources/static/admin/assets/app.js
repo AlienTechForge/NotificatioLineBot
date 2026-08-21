@@ -96,7 +96,8 @@
     const VIEWS = {
         dashboard: { title: '總覽', sub: '服務狀態一覽', load: loadDashboard },
         clients: { title: '憑證', sub: '建立、作廢、設定預設對象', load: loadClients },
-        send: { title: '發送', sub: '從後台直接發測試通知', load: loadSend },
+        send: { title: '發送', sub: '從後台直接發通知，或排到之後', load: loadSend },
+        scheduled: { title: '排程', sub: '還沒到派送時間，可以取消', load: loadScheduled },
         history: { title: '發送紀錄', sub: '最新 100 筆', load: loadHistory },
         users: { title: '使用者', sub: '管理 owner 標記', load: loadUsers },
     };
@@ -134,11 +135,43 @@
             c.lastChild.style.width = '60%';
             return c;
         }));
+        $('quotaBody').replaceChildren(el('div', 'skeleton'));
+        $('quotaSub').textContent = '載入中…';
+
         try {
             const [stats, recent] = await Promise.all([call('/stats'), call('/notifications')]);
             renderStats(stats);
             renderDashRecent(recent.slice(0, 10));
         } catch (e) { pageError('載入失敗：' + e.message); }
+
+        // 獨立 try：LINE 配額查詢失敗不該讓上面已經渲染好的內容跟著消失
+        try {
+            renderQuota(await call('/line-quota'));
+        } catch (e) {
+            $('quotaSub').textContent = '拿不到（' + e.message + '）';
+            $('quotaBody').replaceChildren();
+        }
+    }
+
+    function renderQuota(q) {
+        if (!q.available) {
+            $('quotaSub').textContent = '目前拿不到用量資訊。';
+            $('quotaBody').replaceChildren();
+            return;
+        }
+        if (q.unlimited) {
+            $('quotaSub').textContent = '這個方案沒有月上限。';
+            $('quotaBody').replaceChildren(el('div', 'stat__value', q.used + ' 則'), el('div', 'stat__sub', '本月已發送'));
+            return;
+        }
+        const pct = q.limit > 0 ? Math.min(100, Math.round((q.used / q.limit) * 100)) : 0;
+        $('quotaSub').textContent = `本月已用 ${q.used} / ${q.limit}（${pct}%）`;
+        const bar = el('div');
+        bar.style.cssText = 'height:8px;border-radius:999px;background:var(--c-surface-2);overflow:hidden';
+        const fill = el('div');
+        fill.style.cssText = `height:100%;width:${pct}%;background:${pct >= 90 ? 'var(--c-danger)' : pct >= 70 ? 'var(--c-warning)' : 'var(--c-primary)'};transition:width 300ms`;
+        bar.append(fill);
+        $('quotaBody').replaceChildren(bar);
     }
 
     function statCard(label, value, sub, cls) {
@@ -347,36 +380,105 @@
         }));
         buildUserPicker($('sendUserPicker'), [], () => {});
         document.querySelectorAll('input[name="sendType"]').forEach((i) => { i.checked = i.value === ''; });
+        document.querySelectorAll('input[name="sendWhen"]').forEach((i) => { i.checked = i.value === 'now'; });
+        $('sendScheduleAt').value = '';
         syncSendPicker();
+        syncSendWhen();
     }
 
     function syncSendPicker() {
         $('sendUserPickerField').hidden = selectedRadio('sendType') !== 'USER';
     }
 
+    function syncSendWhen() {
+        const later = selectedRadio('sendWhen') === 'later';
+        $('sendScheduleField').hidden = !later;
+        if (later && !$('sendScheduleAt').value) {
+            // 預先帶入「現在 + 5 分鐘」，省得每次都要自己算
+            const d = new Date(Date.now() + 5 * 60 * 1000);
+            d.setSeconds(0, 0);
+            $('sendScheduleAt').value = toLocalInputValue(d);
+        }
+    }
+
+    /** datetime-local 要的格式是不帶時區的 YYYY-MM-DDTHH:mm，用本機時間。 */
+    function toLocalInputValue(date) {
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+            + `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
     async function submitSend(event) {
         event.preventDefault();
         $('sendError').hidden = true; $('sendOk').hidden = true;
         const type = selectedRadio('sendType');
+
+        let scheduledAt = null;
+        if (selectedRadio('sendWhen') === 'later') {
+            const raw = $('sendScheduleAt').value;
+            if (!raw) {
+                const box = $('sendError'); box.textContent = '請選擇排程時間。'; box.hidden = false;
+                return;
+            }
+            // datetime-local 的值沒有時區資訊，new Date(...) 會當成本機時間解讀 —— 正是我們要的。
+            scheduledAt = new Date(raw).toISOString();
+        }
+
         const body = {
             clientId: $('sendClient').value,
             type: type || null,
             userIds: type === 'USER' ? checkedValues($('sendUserPicker')) : [],
             title: $('sendTitle').value.trim() || null,
             text: $('sendText').value,
+            scheduledAt,
         };
         const btn = $('sendSubmit');
         btn.disabled = true; btn.textContent = '送出中…';
         try {
             const accepted = await call('/notifications/test', { method: 'POST', body: JSON.stringify(body) });
             const ok = $('sendOk');
-            ok.textContent = `已受理：${accepted.recipientCount} 位收件人、${accepted.batchCount} 批。到「紀錄」查最終狀態。`;
+            ok.textContent = scheduledAt
+                ? `已排程：${accepted.recipientCount} 位收件人、${accepted.batchCount} 批。到「排程」頁查看或取消。`
+                : `已受理：${accepted.recipientCount} 位收件人、${accepted.batchCount} 批。到「紀錄」查最終狀態。`;
             ok.hidden = false;
             $('sendText').value = '';
-            toast('已送出');
+            toast(scheduledAt ? '已排程' : '已送出');
         } catch (e) {
             const box = $('sendError'); box.textContent = e.message; box.hidden = false;
         } finally { btn.disabled = false; btn.textContent = '送出'; }
+    }
+
+    // ============================================================ 排程
+
+    async function loadScheduled() {
+        try {
+            const rows = await call('/notifications/scheduled');
+            $('scheduledRows').replaceChildren(...rows.map(scheduledRow));
+            $('scheduledEmpty').hidden = rows.length !== 0;
+        } catch (e) { pageError('載入失敗：' + e.message); }
+    }
+
+    function scheduledRow(s) {
+        const tr = el('tr');
+        tr.append(td(fmtTime(s.scheduledAt)));
+        tr.append(td(s.clientName));
+        const t = el('td'); t.append(el('span', 'tag tag--target', TARGET_LABEL[s.targetType] || s.targetType)); tr.append(t);
+        tr.append(tdNum(s.recipientCount));
+        const act = el('td');
+        const wrap = el('div', 'row-actions');
+        wrap.append(iconBtn('取消', () => cancelScheduled(s), 'btn--danger'));
+        act.append(wrap);
+        tr.append(act);
+        return tr;
+    }
+
+    async function cancelScheduled(s) {
+        if (!confirm(`取消排到 ${fmtTime(s.scheduledAt)} 的通知（${s.clientName}）？`)) return;
+        try {
+            await call('/notifications/' + encodeURIComponent(s.notificationId) + '/schedule', { method: 'DELETE' });
+            toast('已取消');
+            await loadScheduled();
+        } catch (e) { toast(e.message, true); }
     }
 
     // ============================================================ 紀錄
@@ -556,6 +658,7 @@
     $('targetCancel').addEventListener('click', () => $('targetDialog').close());
 
     document.querySelectorAll('input[name="sendType"]').forEach((i) => i.addEventListener('change', syncSendPicker));
+    document.querySelectorAll('input[name="sendWhen"]').forEach((i) => i.addEventListener('change', syncSendWhen));
     $('sendForm').addEventListener('submit', submitSend);
 
     $('detailClose').addEventListener('click', () => $('detailDialog').close());

@@ -1,10 +1,12 @@
 package com.jason.notifyline.notification.dispatch;
 
 import com.jason.notifyline.config.DispatchProperties;
+import com.jason.notifyline.notification.domain.DeliveryStatus;
 import com.jason.notifyline.notification.domain.Notification;
 import com.jason.notifyline.notification.domain.NotificationDelivery;
 import com.jason.notifyline.notification.domain.NotificationDeliveryRepository;
 import com.jason.notifyline.notification.domain.NotificationRepository;
+import com.jason.notifyline.notification.domain.NotificationStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Limit;
@@ -93,6 +95,35 @@ public class DeliveryStore {
                     notification.get().getPayload()));
         }
         return claimed;
+    }
+
+    /**
+     * 取消一則還沒開始送的排程通知。
+     *
+     * @return {@code true} 成功取消；{@code false} 已經在送或已結束，取消不到
+     *
+     * <p><strong>已知的窄視窗競態</strong>：這裡讀 {@code notification.status} 判斷
+     * 「還沒開始送」，但沒有跟 {@link #claim} 搶同一把鎖。理論上兩者可能在幾毫秒內
+     * 交錯 —— 取消判定通過的瞬間，派送器剛好把同一批取走並標成 SENDING，
+     * 之後仍然照常送出。要完全杜絕得在真正呼叫 LINE 前再檢查一次取消旗標，
+     * 對一個管理台的便利功能而言不值得那個複雜度：實務上取消都發生在排程時間
+     * 前幾分鐘到幾小時，不是最後幾毫秒。
+     */
+    @Transactional
+    public boolean cancel(UUID notificationId) {
+        Notification notification = notifications.findById(notificationId).orElse(null);
+        if (notification == null || notification.getStatus() != NotificationStatus.QUEUED) {
+            return false;
+        }
+
+        Instant now = clock.instant();
+        for (NotificationDelivery row : deliveries.findByNotificationIdOrderByBatchNo(notificationId)) {
+            if (row.getStatus() == DeliveryStatus.PENDING) {
+                row.markFailed("CANCELLED", "Cancelled by admin before it was due.", now);
+            }
+        }
+        finalise(notificationId, now);
+        return true;
     }
 
     /** 把一次 LINE 呼叫的結果寫回，並在所有批次都結束時算出通知的最終狀態。 */
