@@ -44,6 +44,12 @@ public class AdminController {
         return ApiResponse.ok(adminService.stats());
     }
 
+    /** LINE 官方帳號的月配額用量。獨立於 {@code /stats}，逾時失敗不影響其他卡片。 */
+    @GetMapping("/line-quota")
+    public ApiResponse<AdminDto.LineQuota> lineQuota() {
+        return ApiResponse.ok(adminService.lineQuota());
+    }
+
     // -------------------------------------------------------------- 憑證
 
     @GetMapping("/clients")
@@ -114,5 +120,20 @@ public class AdminController {
     @GetMapping("/notifications/{id}")
     public ApiResponse<NotificationDetail> notificationDetail(@PathVariable UUID id) {
         return ApiResponse.ok(adminService.notificationDetail(id));
+    }
+
+    // -------------------------------------------------------------- 排程
+
+    /** 還沒到派送時間的排程通知，最快到期的排前面。 */
+    @GetMapping("/notifications/scheduled")
+    public ApiResponse<List<AdminDto.ScheduledNotification>> scheduledNotifications() {
+        return ApiResponse.ok(adminService.listScheduled());
+    }
+
+    /** 取消一則排程。已經開始送（或已結束）的取消不到，回 400。 */
+    @DeleteMapping("/notifications/{id}/schedule")
+    public ApiResponse<Void> cancelScheduled(@PathVariable UUID id) {
+        adminService.cancelScheduled(id);
+        return ApiResponse.ok(null);
     }
 }

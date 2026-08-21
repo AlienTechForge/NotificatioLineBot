@@ -438,4 +438,158 @@ class AdminConsoleIT extends PostgresIntegrationTest {
                         .content("{\"clientId\":\"x\",\"text\":\"y\"}"))
                 .andExpect(status().isUnauthorized());
     }
+
+    // ------------------------------------------------------------ LINE 配額
+
+    @Test
+    @DisplayName("LINE 配額：未登入 401；測試環境打不到 LINE，回 available=false 而不是 500")
+    void lineQuota() throws Exception {
+        mockMvc.perform(get("/admin/api/line-quota")).andExpect(status().isUnauthorized());
+
+        mockMvc.perform(get("/admin/api/line-quota").with(admin()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.available").value(false))
+                .andExpect(jsonPath("$.data.limit").doesNotExist())
+                .andExpect(jsonPath("$.data.used").doesNotExist());
+    }
+
+    // ------------------------------------------------------------ 排程
+
+    private void setOwnerDefaultTarget() throws Exception {
+        mockMvc.perform(put("/admin/api/clients/{id}/default-target", clientId)
+                .with(admin()).with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(defaultTargetBody("OWNER")));
+    }
+
+    private String scheduleBody(String scheduledAtIso) {
+        return "{\"clientId\":\"" + clientId + "\",\"text\":\"排程測試\",\"scheduledAt\":\""
+                + scheduledAtIso + "\"}";
+    }
+
+    @Test
+    @DisplayName("排程發送：202 且立刻可在排程頁看到")
+    void scheduleNotification() throws Exception {
+        setOwnerDefaultTarget();
+        String scheduledAt = clock.instant().plusSeconds(600).toString();
+
+        String id = idOf(mockMvc.perform(post("/admin/api/notifications/test")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(scheduleBody(scheduledAt)))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.data.status").value("QUEUED"))
+                .andReturn().getResponse().getContentAsString());
+
+        mockMvc.perform(get("/admin/api/notifications/scheduled").with(admin()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[?(@.notificationId=='" + id + "')]").exists())
+                .andExpect(jsonPath("$.data[0].clientName").value("svc"));
+
+        // 排程還沒到，不該被立即派送的批次也一起寫進 outbox 佇列裡佔位。
+        // Postgres timestamptz 只有微秒精度，比對容許次微秒級的捨入差異。
+        assertThat(deliveries.findAll()).hasSize(1);
+        assertThat(deliveries.findAll().getFirst().getNextAttemptAt())
+                .isCloseTo(java.time.Instant.parse(scheduledAt),
+                        org.assertj.core.api.Assertions.within(1, java.time.temporal.ChronoUnit.MILLIS));
+    }
+
+    @Test
+    @DisplayName("排程時間不到 30 秒後 → 400，不會寫入")
+    void scheduleTooSoonRejected() throws Exception {
+        setOwnerDefaultTarget();
+        String scheduledAt = clock.instant().plusSeconds(5).toString();
+
+        mockMvc.perform(post("/admin/api/notifications/test")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(scheduleBody(scheduledAt)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"));
+
+        assertThat(notifications.findAll()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("排程時間超過一年 → 400，抓可能選錯年份")
+    void scheduleTooFarRejected() throws Exception {
+        setOwnerDefaultTarget();
+        String scheduledAt = clock.instant().plus(java.time.Duration.ofDays(400)).toString();
+
+        mockMvc.perform(post("/admin/api/notifications/test")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(scheduleBody(scheduledAt)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("取消排程：狀態變成非 QUEUED，且從排程頁消失")
+    void cancelScheduled() throws Exception {
+        setOwnerDefaultTarget();
+        String scheduledAt = clock.instant().plusSeconds(600).toString();
+        String id = idOf(mockMvc.perform(post("/admin/api/notifications/test")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(scheduleBody(scheduledAt)))
+                .andReturn().getResponse().getContentAsString());
+
+        mockMvc.perform(delete("/admin/api/notifications/{id}/schedule", id)
+                        .with(admin()).with(csrf()))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/admin/api/notifications/scheduled").with(admin()))
+                .andExpect(jsonPath("$.data").isArray())
+                .andExpect(jsonPath("$.data[?(@.notificationId=='" + id + "')]").doesNotExist());
+
+        var cancelled = notifications.findById(java.util.UUID.fromString(id)).orElseThrow();
+        assertThat(cancelled.getStatus().name()).isEqualTo("FAILED");
+        assertThat(deliveries.findByNotificationIdOrderByBatchNo(java.util.UUID.fromString(id))
+                .getFirst().getErrorCode()).isEqualTo("CANCELLED");
+    }
+
+    @Test
+    @DisplayName("取消不存在的通知 → 404")
+    void cancelUnknownNotification() throws Exception {
+        mockMvc.perform(delete("/admin/api/notifications/{id}/schedule",
+                        java.util.UUID.randomUUID())
+                        .with(admin()).with(csrf()))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    @DisplayName("已經開始送的通知取消不到 → 400")
+    void cancelAlreadySendingRejected() throws Exception {
+        setOwnerDefaultTarget();
+        String scheduledAt = clock.instant().plusSeconds(600).toString();
+        String id = idOf(mockMvc.perform(post("/admin/api/notifications/test")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(scheduleBody(scheduledAt)))
+                .andReturn().getResponse().getContentAsString());
+
+        // 模擬派送器已經把它取走在送
+        var notification = notifications.findById(java.util.UUID.fromString(id)).orElseThrow();
+        notification.markSending(clock.instant());
+        notifications.save(notification);
+
+        mockMvc.perform(delete("/admin/api/notifications/{id}/schedule", id)
+                        .with(admin()).with(csrf()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"));
+    }
+
+    @Test
+    @DisplayName("排程/取消端點未登入一律 401")
+    void scheduleEndpointsRequireAuth() throws Exception {
+        mockMvc.perform(get("/admin/api/notifications/scheduled")).andExpect(status().isUnauthorized());
+        mockMvc.perform(delete("/admin/api/notifications/{id}/schedule", java.util.UUID.randomUUID())
+                        .with(csrf()))
+                .andExpect(status().isUnauthorized());
+    }
+
+    private static String idOf(String responseBody) {
+        int start = responseBody.indexOf("\"notificationId\":\"") + 18;
+        return responseBody.substring(start, responseBody.indexOf('"', start));
+    }
 }

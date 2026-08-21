@@ -16,6 +16,7 @@ import com.jason.notifyline.notification.NotificationService;
 import com.jason.notifyline.notification.api.NotificationAccepted;
 import com.jason.notifyline.notification.api.NotificationDetail;
 import com.jason.notifyline.notification.api.NotificationRequest;
+import com.jason.notifyline.notification.dispatch.DeliveryStore;
 import com.jason.notifyline.notification.domain.Notification;
 import com.jason.notifyline.notification.domain.NotificationDeliveryRepository;
 import com.jason.notifyline.notification.domain.NotificationRepository;
@@ -51,6 +52,18 @@ public class AdminService {
     /** 儀表板的統計窗口。 */
     private static final Duration STATS_WINDOW = Duration.ofHours(24);
 
+    /** 排程頁列出的上限。 */
+    private static final int SCHEDULED_LIMIT = 200;
+
+    /**
+     * 排程時間的下限緩衝。小於這個值就直接當「立即發送」處理更誠實 ——
+     * 使用者選了「30 秒後」跟選「現在」實務上沒有差別，卻要多一套排程 UI 狀態。
+     */
+    private static final Duration MIN_SCHEDULE_LEAD = Duration.ofSeconds(30);
+
+    /** 排程時間的上限，抓明顯打錯的年份（例如選單誤觸成 2099）。 */
+    private static final Duration MAX_SCHEDULE_LEAD = Duration.ofDays(366);
+
     private final ClientRepository clients;
     private final ClientService clientService;
     private final LineUserRepository lineUsers;
@@ -58,6 +71,8 @@ public class AdminService {
     private final NotificationService notificationService;
     private final NotificationRepository notifications;
     private final NotificationDeliveryRepository deliveries;
+    private final DeliveryStore deliveryStore;
+    private final LineQuotaClient lineQuotaClient;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -68,6 +83,8 @@ public class AdminService {
                         NotificationService notificationService,
                         NotificationRepository notifications,
                         NotificationDeliveryRepository deliveries,
+                        DeliveryStore deliveryStore,
+                        LineQuotaClient lineQuotaClient,
                         ObjectMapper objectMapper,
                         Clock clock) {
         this.clients = clients;
@@ -77,6 +94,8 @@ public class AdminService {
         this.notificationService = notificationService;
         this.notifications = notifications;
         this.deliveries = deliveries;
+        this.deliveryStore = deliveryStore;
+        this.lineQuotaClient = lineQuotaClient;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -98,6 +117,11 @@ public class AdminService {
                 notifications.countByStatusAndCreatedAtGreaterThanEqual(NotificationStatus.SUCCEEDED, since),
                 notifications.countByStatusAndCreatedAtGreaterThanEqual(NotificationStatus.PARTIAL, since),
                 notifications.countByStatusAndCreatedAtGreaterThanEqual(NotificationStatus.FAILED, since));
+    }
+
+    /** LINE 官方帳號的月配額用量。獨立於 {@link #stats()}，失敗不影響其餘卡片。 */
+    public AdminDto.LineQuota lineQuota() {
+        return lineQuotaClient.current();
     }
 
     // -------------------------------------------------------------- 憑證
@@ -207,12 +231,14 @@ public class AdminService {
     // -------------------------------------------------------------- 發送
 
     /**
-     * 從後台直接發一則通知，用指定 client 的身分。
+     * 從後台直接發一則通知，用指定 client 的身分。{@code request.scheduledAt} 非
+     * null 時改為排程，不會立刻送。
      *
      * <p>重用 {@link NotificationService#submit}，因此 scope 檢查、預設對象、
      * 連結白名單、切批全部一致 —— 後台不是另一條發送路徑，只是換個地方觸發。
      *
-     * @throws ApiException client 不存在或非 ACTIVE（400），或發送被拒（原樣往上拋）
+     * @throws ApiException client 不存在或非 ACTIVE（400）、排程時間不合理（400），
+     *                       或發送被拒（原樣往上拋）
      */
     @Transactional
     public NotificationAccepted sendTest(AdminDto.SendTestRequest request) {
@@ -223,6 +249,8 @@ public class AdminService {
             throw new ApiException(ErrorCode.VALIDATION_ERROR,
                     "Client is not active: " + request.clientId());
         }
+
+        Instant scheduledAt = validateScheduledAt(request.scheduledAt());
 
         NotificationRequest.Target target = request.type() == null
                 ? null
@@ -242,7 +270,67 @@ public class AdminService {
                 notificationRequest,
                 rawBody,
                 null,
-                "admin-" + UUID.randomUUID());
+                "admin-" + UUID.randomUUID(),
+                scheduledAt);
+    }
+
+    /**
+     * @return null（立即發送），或驗證過、確定在未來的排程時間
+     * @throws ApiException 排在過去，或排得離譜地遠（很可能是選錯年份）
+     */
+    private Instant validateScheduledAt(Instant requested) {
+        if (requested == null) {
+            return null;
+        }
+        Instant now = clock.instant();
+        if (requested.isBefore(now.plus(MIN_SCHEDULE_LEAD))) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR,
+                    "scheduledAt must be at least " + MIN_SCHEDULE_LEAD.toSeconds()
+                            + " seconds in the future.");
+        }
+        if (requested.isAfter(now.plus(MAX_SCHEDULE_LEAD))) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR,
+                    "scheduledAt is more than " + MAX_SCHEDULE_LEAD.toDays()
+                            + " days out — double-check the date.");
+        }
+        return requested;
+    }
+
+    // ------------------------------------------------------------ 排程
+
+    /** 還沒到派送時間的排程通知，最快到期的排前面。 */
+    @Transactional(readOnly = true)
+    public List<AdminDto.ScheduledNotification> listScheduled() {
+        Map<Long, String> clientNames = clients.findAll().stream()
+                .collect(java.util.stream.Collectors.toMap(Client::getId, Client::getName));
+
+        return notifications
+                .findByScheduledAtIsNotNullAndStatusOrderByScheduledAtAsc(
+                        NotificationStatus.QUEUED, Limit.of(SCHEDULED_LIMIT))
+                .stream()
+                .map(n -> AdminDto.ScheduledNotification.from(
+                        n, clientNames.getOrDefault(n.getClientId(), "(unknown)")))
+                .toList();
+    }
+
+    /**
+     * 取消一則排程。已經開始送（或已結束）的取消不到。
+     *
+     * @throws ApiException 找不到該筆通知（404），或已經不是「還沒開始送」的
+     *                       狀態（400）—— 兩者分開回，前端才能顯示對的訊息
+     */
+    @Transactional
+    public void cancelScheduled(UUID notificationId) {
+        Notification notification = notifications.findById(notificationId)
+                .orElseThrow(() -> new ApiException(ErrorCode.NOT_FOUND, "Notification not found."));
+
+        boolean cancelled = deliveryStore.cancel(notificationId);
+        if (!cancelled) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR,
+                    "Cannot cancel: status is already " + notification.getStatus()
+                            + " (has started sending or finished).");
+        }
+        log.info("後台取消排程：notificationId={}", notificationId);
     }
 
     // ------------------------------------------------------------ 發送紀錄
