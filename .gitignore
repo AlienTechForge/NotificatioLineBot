@@ -51,4 +51,5 @@ deploy/nginx/admin-gate.map
 # 只忽略 skills/，保留 .claude/ 其他內容的版控可能性。
 .agents/
 .claude/skills/
+.claude/worktrees/
 skills-lock.json
