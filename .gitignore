@@ -46,3 +46,9 @@ deploy/nginx/admin-gate.map
 
 # code graph tool cache
 .codegraph/
+
+# 外部拉取的 agent skill 快取（來源在 skills-lock.json，隨時可重抓）。
+# 只忽略 skills/，保留 .claude/ 其他內容的版控可能性。
+.agents/
+.claude/skills/
+skills-lock.json
