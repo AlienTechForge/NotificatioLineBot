@@ -115,7 +115,10 @@ CREATE TABLE api_monitor_run (
 COMMENT ON COLUMN api_monitor_run.error_message IS
     '只寫分類與長度，不得含目標 API 回應內容全文（可能含機敏資料）。';
 COMMENT ON COLUMN api_monitor_run.notification_id IS
-    '僅 outcome=CHANGED 且通過防洗版時有值。指向 notification.id，不設外鍵 —— '
+    '這一列執行實際送出成功的通知 id：outcome=CHANGED 時是變更通知；outcome=FAILED '
+    '時，若連續失敗達門檻而發出失敗通知，是那則失敗通知；成功執行若接在一次已通知'
+    '的故障之後，是補發的恢復通知（此時 outcome 通常是 UNCHANGED/SKIPPED，變更通知'
+    '優先於恢復通知）。三種情況以外為 null。指向 notification.id，不設外鍵 —— '
     'notification 90 天後可能被清理，此處是歷史紀錄不該因此被連動刪除。';
 
 -- 管理台「最近執行紀錄」查詢路徑

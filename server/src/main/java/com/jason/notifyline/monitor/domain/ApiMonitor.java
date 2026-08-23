@@ -169,20 +169,9 @@ public class ApiMonitor {
                       int cooldownSeconds,
                       Integer maxNotificationsPerDay,
                       Instant now) {
-        String normalizedMethod = method == null ? "GET" : method.toUpperCase(Locale.ROOT);
-        if (!"GET".equals(normalizedMethod) && !"POST".equals(normalizedMethod)) {
-            throw new IllegalArgumentException("method must be GET or POST: " + method);
-        }
-        // 抄 api_monitor_interval_chk：應用層先給出好的錯誤訊息，資料庫仍是最後一道防線。
-        if (intervalSeconds < 30) {
-            throw new IllegalArgumentException("intervalSeconds must be >= 30: " + intervalSeconds);
-        }
-        // 抄 api_monitor_newitems_chk：NEW_ITEMS 一定要有陣列位置與鍵位置，
-        // 否則無從判斷「新」。讓「型別與位置不一致」這種狀態在應用層就無法建立。
-        if (compareMode == CompareMode.NEW_ITEMS && (itemPointer == null || itemKeyPointer == null)) {
-            throw new IllegalArgumentException(
-                    "NEW_ITEMS mode requires both itemPointer and itemKeyPointer");
-        }
+        String normalizedMethod = validateAndNormalizeMethod(method);
+        validateInterval(intervalSeconds);
+        validateNewItemsPointers(compareMode, itemPointer, itemKeyPointer);
 
         this.name = name;
         this.clientId = clientId;
@@ -210,6 +199,39 @@ public class ApiMonitor {
         this.notifiedCount = 0;
         this.createdAt = now;
         this.updatedAt = now;
+    }
+
+    // ------------------------------------------------------- 建構期共用驗證
+
+    /**
+     * 抄 {@code api_monitor_method_chk}：應用層先給出好的錯誤訊息，資料庫仍是最後一道防線。
+     * 建構子與 {@link #applyUpdate}（W4，後台編輯）共用同一份規則，避免兩處各自維護
+     * 一份、日後改一邊漏改另一邊。
+     */
+    private static String validateAndNormalizeMethod(String method) {
+        String normalized = method == null ? "GET" : method.toUpperCase(Locale.ROOT);
+        if (!"GET".equals(normalized) && !"POST".equals(normalized)) {
+            throw new IllegalArgumentException("method must be GET or POST: " + method);
+        }
+        return normalized;
+    }
+
+    /** 抄 {@code api_monitor_interval_chk}。理由同 {@link #validateAndNormalizeMethod}。 */
+    private static void validateInterval(int intervalSeconds) {
+        if (intervalSeconds < 30) {
+            throw new IllegalArgumentException("intervalSeconds must be >= 30: " + intervalSeconds);
+        }
+    }
+
+    /**
+     * 抄 {@code api_monitor_newitems_chk}：NEW_ITEMS 一定要有陣列位置與鍵位置，
+     * 否則無從判斷「新」。讓「型別與位置不一致」這種狀態在應用層就無法建立。
+     */
+    private static void validateNewItemsPointers(CompareMode compareMode, String itemPointer, String itemKeyPointer) {
+        if (compareMode == CompareMode.NEW_ITEMS && (itemPointer == null || itemKeyPointer == null)) {
+            throw new IllegalArgumentException(
+                    "NEW_ITEMS mode requires both itemPointer and itemKeyPointer");
+        }
     }
 
     // ---------------------------------------------------------------- getters
@@ -404,6 +426,83 @@ public class ApiMonitor {
     public void applyFingerprint(byte[] fingerprint, String stateJson) {
         this.lastFingerprint = fingerprint == null ? null : fingerprint.clone();
         this.lastState = stateJson;
+    }
+
+    // ------------------------------------------------------------ 狀態轉換（W4）
+
+    /**
+     * 後台編輯（{@code PUT /admin/api/monitors/{id}}）：整份取代設定欄位，執行狀態
+     * （{@code next_run_at}、fingerprint、失敗計數等）完全不動——編輯設定不該讓下一次
+     * 排程時間、比對基準跟著重置，那會讓使用者以為監控「重新開始」而困惑，也會在
+     * 只是想改個 cooldown 秒數時意外把 fingerprint 清掉、白白多發一次通知。
+     *
+     * <p>Header 不在這裡處理——加密需要先知道 id（見
+     * {@code Docs/plan/11-API監控輪詢設計.md} §10 的 AAD 陷阱說明），呼叫端要另外呼叫
+     * {@link #applyHeaders}。
+     *
+     * @throws IllegalArgumentException 驗證規則同建構子（method、interval、NEW_ITEMS 欄位）
+     */
+    public void applyUpdate(String name,
+                            Long clientId,
+                            String url,
+                            String method,
+                            String requestBody,
+                            int intervalSeconds,
+                            boolean enabled,
+                            CompareMode compareMode,
+                            String extractRules,
+                            String itemPointer,
+                            String itemKeyPointer,
+                            String messageTemplate,
+                            boolean notifyOnFailure,
+                            int cooldownSeconds,
+                            Integer maxNotificationsPerDay,
+                            Instant now) {
+        String normalizedMethod = validateAndNormalizeMethod(method);
+        validateInterval(intervalSeconds);
+        validateNewItemsPointers(compareMode, itemPointer, itemKeyPointer);
+
+        this.name = name;
+        this.clientId = clientId;
+        this.url = url;
+        this.method = normalizedMethod;
+        this.requestBody = requestBody;
+        this.intervalSeconds = intervalSeconds;
+        this.enabled = enabled;
+        this.compareMode = compareMode;
+        this.extractRules = extractRules == null ? "[]" : extractRules;
+        this.itemPointer = itemPointer;
+        this.itemKeyPointer = itemKeyPointer;
+        this.messageTemplate = messageTemplate;
+        this.notifyOnFailure = notifyOnFailure;
+        this.cooldownSeconds = cooldownSeconds;
+        this.maxNotificationsPerDay = maxNotificationsPerDay;
+        this.updatedAt = now;
+    }
+
+    /**
+     * 覆寫（或保留）加密後的 header。
+     *
+     * <p>呼叫端（{@code AdminService}）要自己判斷「編輯時 header 欄位留空 = 不變更」
+     * ——這個方法本身沒有「不變更」的語意，只要被呼叫就會整份覆寫，包含用
+     * {@code ciphertext = null} 清除既有 header。
+     *
+     * <p><strong>AAD 陷阱</strong>：header 密文的 AAD 是 {@code monitor:{id}}，建立新監控時
+     * id 要到第一次 {@code save()}（{@code BIGSERIAL}）後才存在。呼叫端必須先插入拿到 id、
+     * 用該 id 加密，再呼叫這個方法回寫密文——用還是 {@code null} 的 id 加密會產生永遠解不開
+     * 的密文。這個方法本身不驗證 AAD 是否用對了 id，那是呼叫端的責任。
+     */
+    public void applyHeaders(byte[] ciphertext, byte[] iv, Integer keyVersion, Instant now) {
+        this.headersCiphertext = ciphertext == null ? null : ciphertext.clone();
+        this.headersIv = iv == null ? null : iv.clone();
+        this.headersKeyVersion = keyVersion;
+        this.updatedAt = now;
+    }
+
+    /** 啟用／停用。{@code next_run_at} 不動——理由同 {@link #applyUpdate}。 */
+    public void setEnabled(boolean enabled, Instant now) {
+        this.enabled = enabled;
+        this.updatedAt = now;
     }
 
     /** 冷卻中：上次通知時間 + 冷卻秒數仍在未來。 */

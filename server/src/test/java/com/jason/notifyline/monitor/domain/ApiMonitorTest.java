@@ -382,4 +382,140 @@ class ApiMonitorTest {
             assertThat(monitor.getLastFingerprint()).isNull();
         }
     }
+
+    // ============================================================ W4：後台編輯
+
+    @Nested
+    @DisplayName("applyUpdate")
+    class ApplyUpdateTest {
+
+        @Test
+        @DisplayName("整份取代設定欄位，但不動執行狀態（next_run_at / fingerprint / 失敗計數）")
+        void replacesConfigButNotRuntimeState() {
+            ApiMonitor monitor = newMonitor("GET", 60, CompareMode.WHOLE_BODY, null, null);
+            monitor.applyFingerprint(new byte[]{9, 9}, "{\"x\":\"1\"}");
+            monitor.recordFailure(T0.plusSeconds(10), 60);
+            Instant nextRunBefore = monitor.getNextRunAt();
+
+            Instant now = T0.plusSeconds(500);
+            monitor.applyUpdate(
+                    "renamed", 2L, "https://example.org/new", "post", "{\"q\":1}",
+                    90, false, CompareMode.EXTRACTED, "[{\"name\":\"x\",\"pointer\":\"/x\"}]",
+                    null, null, "{{value.x}}", false, 30, 5, now);
+
+            assertThat(monitor.getName()).isEqualTo("renamed");
+            assertThat(monitor.getClientId()).isEqualTo(2L);
+            assertThat(monitor.getUrl()).isEqualTo("https://example.org/new");
+            assertThat(monitor.getMethod()).isEqualTo("POST");
+            assertThat(monitor.getRequestBody()).isEqualTo("{\"q\":1}");
+            assertThat(monitor.getIntervalSeconds()).isEqualTo(90);
+            assertThat(monitor.isEnabled()).isFalse();
+            assertThat(monitor.getCompareMode()).isEqualTo(CompareMode.EXTRACTED);
+            assertThat(monitor.getCooldownSeconds()).isEqualTo(30);
+            assertThat(monitor.getMaxNotificationsPerDay()).isEqualTo(5);
+            assertThat(monitor.isNotifyOnFailure()).isFalse();
+            assertThat(monitor.getUpdatedAt()).isEqualTo(now);
+
+            // 執行狀態完全不受編輯影響——理由見方法註解。
+            assertThat(monitor.getNextRunAt()).isEqualTo(nextRunBefore);
+            assertThat(monitor.getLastFingerprint()).containsExactly(9, 9);
+            assertThat(monitor.getConsecutiveFailures()).isEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("驗證規則與建構子共用：method 不合法拒絕")
+        void rejectsInvalidMethod() {
+            ApiMonitor monitor = newMonitor("GET", 60, CompareMode.WHOLE_BODY, null, null);
+
+            assertThatThrownBy(() -> monitor.applyUpdate(
+                    "x", 1L, "https://example.com", "DELETE", null,
+                    60, true, CompareMode.WHOLE_BODY, "[]", null, null,
+                    "{{value.x}}", true, 0, null, T0))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("DELETE");
+        }
+
+        @Test
+        @DisplayName("驗證規則與建構子共用：NEW_ITEMS 缺 pointer 拒絕")
+        void rejectsNewItemsWithoutPointers() {
+            ApiMonitor monitor = newMonitor("GET", 60, CompareMode.WHOLE_BODY, null, null);
+
+            assertThatThrownBy(() -> monitor.applyUpdate(
+                    "x", 1L, "https://example.com", "GET", null,
+                    60, true, CompareMode.NEW_ITEMS, "[]", null, null,
+                    "{{item.x}}", true, 0, null, T0))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        @Test
+        @DisplayName("驗證規則與建構子共用：interval 低於 30 秒拒絕")
+        void rejectsIntervalBelowMinimum() {
+            ApiMonitor monitor = newMonitor("GET", 60, CompareMode.WHOLE_BODY, null, null);
+
+            assertThatThrownBy(() -> monitor.applyUpdate(
+                    "x", 1L, "https://example.com", "GET", null,
+                    29, true, CompareMode.WHOLE_BODY, "[]", null, null,
+                    "{{value.x}}", true, 0, null, T0))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
+    @Nested
+    @DisplayName("applyHeaders")
+    class ApplyHeadersTest {
+
+        @Test
+        @DisplayName("覆寫既有的 header 密文/IV/版本，並防禦性複製")
+        void overwritesHeadersDefensively() {
+            ApiMonitor monitor = newMonitor("GET", 60, CompareMode.WHOLE_BODY, null, null);
+            byte[] cipher = {1, 2, 3};
+            byte[] iv = {4, 5, 6};
+
+            monitor.applyHeaders(cipher, iv, 2, T0.plusSeconds(1));
+            cipher[0] = 99;
+            iv[0] = 99;
+
+            assertThat(monitor.getHeadersCiphertext()).containsExactly(1, 2, 3);
+            assertThat(monitor.getHeadersIv()).containsExactly(4, 5, 6);
+            assertThat(monitor.getHeadersKeyVersion()).isEqualTo(2);
+            assertThat(monitor.getUpdatedAt()).isEqualTo(T0.plusSeconds(1));
+        }
+
+        @Test
+        @DisplayName("傳 null 清除既有 header")
+        void nullClearsExistingHeaders() {
+            ApiMonitor monitor = new ApiMonitor(
+                    "test", 1L, "https://example.com", "GET", null,
+                    new byte[]{1}, new byte[]{2}, 1,
+                    60, true, CompareMode.WHOLE_BODY, "[]", null, null,
+                    "{{value.x}}", true, 0, null, T0);
+
+            monitor.applyHeaders(null, null, null, T0.plusSeconds(1));
+
+            assertThat(monitor.getHeadersCiphertext()).isNull();
+            assertThat(monitor.getHeadersIv()).isNull();
+            assertThat(monitor.getHeadersKeyVersion()).isNull();
+        }
+    }
+
+    @Nested
+    @DisplayName("setEnabled")
+    class SetEnabledTest {
+
+        @Test
+        @DisplayName("切換 enabled，不動 next_run_at")
+        void togglesEnabledWithoutTouchingSchedule() {
+            ApiMonitor monitor = newMonitor("GET", 60, CompareMode.WHOLE_BODY, null, null);
+            Instant nextRunBefore = monitor.getNextRunAt();
+
+            monitor.setEnabled(false, T0.plusSeconds(1));
+
+            assertThat(monitor.isEnabled()).isFalse();
+            assertThat(monitor.getNextRunAt()).isEqualTo(nextRunBefore);
+            assertThat(monitor.getUpdatedAt()).isEqualTo(T0.plusSeconds(1));
+
+            monitor.setEnabled(true, T0.plusSeconds(2));
+            assertThat(monitor.isEnabled()).isTrue();
+        }
+    }
 }
