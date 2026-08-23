@@ -22,10 +22,11 @@ import java.util.Locale;
  * （{@code ApiMonitorRepository.lockDue}）本來就要把兩者一起讀出來，拆開只會
  * 多一次 join，換不到任何好處。
  *
- * <p>本波次（W1）只提供資料結構：建構子做與 migration CHECK 約束對應的防禦性
- * 驗證（給更好的錯誤訊息，資料庫仍是最後一道防線），不提供狀態轉換方法
- * （claim / recordSuccess / recordFailure 等）——那些是 W3 {@code ApiMonitorStore}
- * 的職責，會在該波次直接擴充這個檔案。
+ * <p>W1 只提供資料結構：建構子做與 migration CHECK 約束對應的防禦性驗證（給更好的
+ * 錯誤訊息，資料庫仍是最後一道防線）。<strong>W3 在這裡加上狀態轉換方法</strong>
+ * （{@link #lease}、{@link #recordSuccess}、{@link #recordFailure} 等）——
+ * 這些方法只操作記憶體中的欄位，不知道交易邊界，呼叫端（{@code ApiMonitorStore}）
+ * 才是決定何時 commit 的地方，見 {@code Docs/plan/11-API監控輪詢設計.md} §7、§8。
  */
 @Entity
 @Table(name = "api_monitor")
@@ -331,6 +332,111 @@ public class ApiMonitor {
 
     public Instant getUpdatedAt() {
         return updatedAt;
+    }
+
+    // ------------------------------------------------------------ 狀態轉換（W3）
+
+    /**
+     * 取件（claim）時把 {@code next_run_at} 推到租約時間，避免下一輪取件撿到同一筆
+     * 還在處理中的監控。見 {@code ApiMonitorStore#claim}。
+     */
+    public void lease(Instant leaseUntil) {
+        this.nextRunAt = leaseUntil;
+    }
+
+    /**
+     * 成功執行一輪（不論有沒有偵測到變更）：重置失敗計數與失敗通知旗標、排下一次
+     * 執行時間。
+     *
+     * @param effectiveIntervalSeconds 呼叫端算好的「有效間隔」——
+     *                                 {@code max(intervalSeconds, app.monitor.min-interval)}。
+     *                                 服務層的最小間隔是防洗版設定，就算監控本身的
+     *                                 {@code interval_seconds} 曾經以較小的下限建立過，
+     *                                 排程仍要用現在生效的下限，不能只看建立當時的值
+     */
+    public void recordSuccess(Instant now, int effectiveIntervalSeconds) {
+        this.lastRunAt = now;
+        this.nextRunAt = now.plusSeconds(effectiveIntervalSeconds);
+        this.consecutiveFailures = 0;
+        this.failureNotified = false;
+        this.updatedAt = now;
+    }
+
+    /**
+     * 抓取或解析失敗：累加連續失敗次數，退避排程。
+     *
+     * <p>{@code next_run_at = now + effectiveIntervalSeconds × min(2^(failures-1), 16)}，
+     * 見 §8。乘數用 {@link #backoffMultiplier} 計算，指數本身先夾在 0..4 之間再取冪，
+     * 避免 {@code consecutiveFailures} 在長時間故障下持續增長時整數運算溢位。
+     *
+     * @param effectiveIntervalSeconds 理由同 {@link #recordSuccess}
+     */
+    public void recordFailure(Instant now, int effectiveIntervalSeconds) {
+        this.lastRunAt = now;
+        this.consecutiveFailures++;
+        int multiplier = backoffMultiplier(consecutiveFailures);
+        this.nextRunAt = now.plusSeconds((long) effectiveIntervalSeconds * multiplier);
+        this.updatedAt = now;
+    }
+
+    /** {@code min(2^(failures-1), 16)}。指數夾在 0..4（2^4=16）避免溢位，語意與直接夾值相同。 */
+    private static int backoffMultiplier(int consecutiveFailures) {
+        int exponent = Math.min(consecutiveFailures - 1, 4);
+        return 1 << exponent;
+    }
+
+    /**
+     * 連續失敗達到門檻、且這次故障期間還沒發過失敗通知。
+     *
+     * <p>{@code failure_notified} 是「這次故障」的旗標，不是「這次執行」的 ——
+     * 見 {@link #markFailureNotified} 與 {@link #recordSuccess}（成功時歸零）。
+     */
+    public boolean shouldNotifyFailure(int threshold) {
+        return consecutiveFailures >= threshold && !failureNotified;
+    }
+
+    /** 已經為這次故障發過失敗通知，避免連續失敗期間每輪都通知。 */
+    public void markFailureNotified() {
+        this.failureNotified = true;
+    }
+
+    /** {@code WHOLE_BODY} / {@code EXTRACTED} 模式：寫回本次的比對基準。 */
+    public void applyFingerprint(byte[] fingerprint, String stateJson) {
+        this.lastFingerprint = fingerprint == null ? null : fingerprint.clone();
+        this.lastState = stateJson;
+    }
+
+    /** 冷卻中：上次通知時間 + 冷卻秒數仍在未來。 */
+    public boolean isCooldownActive(Instant now) {
+        return lastNotifiedAt != null && lastNotifiedAt.plusSeconds(cooldownSeconds).isAfter(now);
+    }
+
+    /**
+     * {@code notified_day} 與傳入的日期不同（含尚未通知過的 {@code null}）就換日、
+     * 歸零計數。呼叫端要先呼叫這個方法，{@link #hasReachedDailyCap} 才會反映今天的
+     * 計數，而不是上一個有通知的日子留下的舊值。
+     */
+    public void rolloverNotifiedDayIfNeeded(LocalDate today) {
+        if (!today.equals(notifiedDay)) {
+            this.notifiedDay = today;
+            this.notifiedCount = 0;
+        }
+    }
+
+    /** {@code max_notifications_per_day} 為 {@code null} 代表不限。 */
+    public boolean hasReachedDailyCap() {
+        return maxNotificationsPerDay != null && notifiedCount >= maxNotificationsPerDay;
+    }
+
+    /**
+     * 記一次成功送出的「變更」通知。只在真的呼叫了
+     * {@code NotificationService.submit()} 且沒有拋例外之後才呼叫這個方法——
+     * 失敗/恢復通知不算在這個計數裡，見 {@code ApiMonitorStore} 的說明。
+     */
+    public void markNotified(Instant now) {
+        this.lastNotifiedAt = now;
+        this.notifiedCount++;
+        this.updatedAt = now;
     }
 
     /** 不輸出 header 密文/IV、目標 URL 的查詢字串可能含機密，這裡也一併略過。 */
