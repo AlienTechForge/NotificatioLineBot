@@ -59,7 +59,7 @@
 
     // --------------------------------------------------------------- 狀態
 
-    const state = { clients: [], users: [], loaded: {} };
+    const state = { clients: [], users: [], monitors: [], loaded: {} };
 
     // --------------------------------------------------------------- 提示
 
@@ -100,6 +100,7 @@
         scheduled: { title: '排程', sub: '還沒到派送時間，可以取消', load: loadScheduled },
         history: { title: '發送紀錄', sub: '最新 100 筆', load: loadHistory },
         users: { title: '使用者', sub: '管理 owner 標記', load: loadUsers },
+        monitors: { title: '監控', sub: '定時打 API、有變更才通知', load: loadMonitors },
     };
 
     let current = 'dashboard';
@@ -583,6 +584,380 @@
         } catch (e) { toast(e.message, true); }
     }
 
+    // ============================================================ 監控
+
+    const COMPARE_MODE_LABEL = { WHOLE_BODY: '整包比對', EXTRACTED: '指定欄位', NEW_ITEMS: '只通知新項目' };
+    const RUN_OUTCOME_TAG = { CHANGED: 'tag--active', UNCHANGED: 'tag--muted', FAILED: 'tag--danger', SKIPPED: 'tag--warning' };
+
+    async function loadMonitors() {
+        try {
+            [state.monitors, state.clients] = await Promise.all([call('/monitors'), call('/clients')]);
+            renderMonitors();
+        } catch (e) { pageError('載入失敗：' + e.message); }
+    }
+
+    function renderMonitors() {
+        const body = $('monitorRows');
+        body.replaceChildren(...state.monitors.map(monitorRow));
+        $('monitorsEmpty').hidden = state.monitors.length !== 0;
+    }
+
+    function monitorRow(m) {
+        const tr = el('tr');
+
+        const name = el('td');
+        name.append(el('div', 'cell-strong', m.name));
+        name.append(el('div', 'cell-mono', m.host || m.url));
+        tr.append(name);
+
+        tr.append(td(m.host || '—'));
+        tr.append(td(m.intervalSeconds + 's'));
+
+        const modeTd = el('td');
+        modeTd.append(el('span', 'tag tag--target', COMPARE_MODE_LABEL[m.compareMode] || m.compareMode));
+        tr.append(modeTd);
+
+        tr.append(monitorStatusCell(m));
+        tr.append(td(fmtTime(m.lastRunAt)));
+
+        const act = el('td');
+        const wrap = el('div', 'row-actions');
+        wrap.append(iconBtn('紀錄', () => openMonitorRuns(m)));
+        wrap.append(iconBtn(m.enabled ? '停用' : '啟用', () => toggleMonitorEnabled(m)));
+        wrap.append(iconBtn('編輯', () => openMonitorEdit(m)));
+        wrap.append(iconBtn('刪除', () => deleteMonitor(m), 'btn--danger'));
+        act.append(wrap);
+        tr.append(act);
+        return tr;
+    }
+
+    function monitorStatusCell(m) {
+        const cell = el('td');
+        if (!m.enabled) {
+            cell.append(el('span', 'tag tag--muted', '停用'));
+        } else if (m.consecutiveFailures > 0) {
+            cell.append(el('span', 'tag tag--danger', `失敗 ${m.consecutiveFailures} 次`));
+        } else {
+            cell.append(el('span', 'tag tag--active', '正常'));
+        }
+        return cell;
+    }
+
+    async function toggleMonitorEnabled(m) {
+        try {
+            const updated = await call('/monitors/' + m.id + '/enabled',
+                { method: 'POST', body: JSON.stringify({ enabled: !m.enabled }) });
+            const i = state.monitors.findIndex((x) => x.id === updated.id);
+            if (i >= 0) state.monitors[i] = updated;
+            renderMonitors();
+            toast(updated.enabled ? '已啟用' : '已停用');
+        } catch (e) { toast(e.message, true); }
+    }
+
+    async function deleteMonitor(m) {
+        if (!confirm(`刪除監控「${m.name}」？此動作不可回復。`)) return;
+        try {
+            await call('/monitors/' + m.id, { method: 'DELETE' });
+            toast(`已刪除 ${m.name}`);
+            await loadMonitors();
+        } catch (e) { toast(e.message, true); }
+    }
+
+    // ---- 新增/編輯抽屜 ----
+
+    let editingMonitor = null; // null = 新增模式
+
+    function openMonitorCreate() {
+        editingMonitor = null;
+        $('monitorTitle').textContent = '新增監控';
+        $('monitorError').hidden = true;
+        $('monitorForm').reset();
+        fillClientSelect($('monClient'));
+        $('monInterval').value = 60;
+        $('monCompareMode').value = 'WHOLE_BODY';
+        $('monEnabled').checked = true;
+        $('monNotifyOnFailure').checked = true;
+        $('monHeaders').value = '';
+        setRuleRows([]);
+        clearTestResult();
+        syncMonitorMethod();
+        syncMonitorCompareMode();
+        $('monitorDialog').showModal();
+    }
+
+    function openMonitorEdit(m) {
+        editingMonitor = m;
+        $('monitorTitle').textContent = '編輯監控：' + m.name;
+        $('monitorError').hidden = true;
+        $('monName').value = m.name;
+        fillClientSelect($('monClient'));
+        $('monClient').value = m.clientId;
+        $('monMethod').value = m.method;
+        $('monUrl').value = m.url;
+        $('monBody').value = m.requestBody || '';
+        $('monHeaders').value = '';
+        $('monInterval').value = m.intervalSeconds;
+        $('monCompareMode').value = m.compareMode;
+        setRuleRows(m.extractRules || []);
+        $('monItemPointer').value = m.itemPointer || '';
+        $('monItemKeyPointer').value = m.itemKeyPointer || '';
+        $('monTemplate').value = m.messageTemplate;
+        $('monCooldown').value = m.cooldownSeconds;
+        $('monMaxPerDay').value = m.maxNotificationsPerDay != null ? m.maxNotificationsPerDay : '';
+        $('monEnabled').checked = m.enabled;
+        $('monNotifyOnFailure').checked = m.notifyOnFailure;
+        clearTestResult();
+        syncMonitorMethod();
+        syncMonitorCompareMode();
+        $('monitorDialog').showModal();
+    }
+
+    function fillClientSelect(sel) {
+        sel.replaceChildren(...state.clients.filter((c) => c.status === 'ACTIVE').map((c) => {
+            const o = el('option', null, `${c.name} (${c.clientId})`);
+            o.value = c.clientId;
+            return o;
+        }));
+    }
+
+    function syncMonitorMethod() {
+        $('monBodyField').hidden = $('monMethod').value !== 'POST';
+    }
+
+    function syncMonitorCompareMode() {
+        $('monItemPointerField').hidden = $('monCompareMode').value !== 'NEW_ITEMS';
+    }
+
+    function clearTestResult() {
+        const box = $('monTestResult');
+        box.hidden = true;
+        box.replaceChildren();
+    }
+
+    // ---- 抽取欄位（extractRules）編輯 ----
+
+    function setRuleRows(rules) {
+        $('monRulesRows').replaceChildren();
+        (rules || []).forEach((r) => addRuleRow(r.name, r.pointer));
+    }
+
+    function addRuleRow(name, pointer) {
+        const row = el('div', 'rule-row');
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.placeholder = '名稱（value.NAME）';
+        nameInput.className = 'rule-row__name';
+        nameInput.value = name || '';
+        const pointerInput = document.createElement('input');
+        pointerInput.type = 'text';
+        pointerInput.placeholder = 'JsonPointer，例如 /data/0/status';
+        pointerInput.className = 'rule-row__pointer';
+        pointerInput.value = pointer || '';
+        const removeBtn = el('button', 'btn btn--sm btn--ghost', '移除');
+        removeBtn.type = 'button';
+        removeBtn.addEventListener('click', () => row.remove());
+        row.append(nameInput, pointerInput, removeBtn);
+        $('monRulesRows').append(row);
+    }
+
+    function collectRuleRows() {
+        return Array.from($('monRulesRows').querySelectorAll('.rule-row'))
+            .map((row) => ({
+                name: row.querySelector('.rule-row__name').value.trim(),
+                pointer: row.querySelector('.rule-row__pointer').value.trim(),
+            }))
+            .filter((r) => r.name || r.pointer);
+    }
+
+    /** 讀取表單，回傳完整設定物件。header 欄位若不是合法 JSON 會直接丟例外，呼叫端要接住。 */
+    function collectMonitorForm() {
+        const headersRaw = $('monHeaders').value.trim();
+        return {
+            name: $('monName').value.trim(),
+            clientId: $('monClient').value,
+            url: $('monUrl').value.trim(),
+            method: $('monMethod').value,
+            requestBody: $('monBody').value.trim() || null,
+            headers: headersRaw ? JSON.parse(headersRaw) : null,
+            intervalSeconds: Number($('monInterval').value),
+            enabled: $('monEnabled').checked,
+            compareMode: $('monCompareMode').value,
+            extractRules: collectRuleRows(),
+            itemPointer: $('monItemPointer').value.trim() || null,
+            itemKeyPointer: $('monItemKeyPointer').value.trim() || null,
+            messageTemplate: $('monTemplate').value,
+            notifyOnFailure: $('monNotifyOnFailure').checked,
+            cooldownSeconds: Number($('monCooldown').value || 0),
+            maxNotificationsPerDay: $('monMaxPerDay').value.trim() ? Number($('monMaxPerDay').value) : null,
+        };
+    }
+
+    function showMonitorFormError(message) {
+        const box = $('monitorError');
+        box.textContent = message;
+        box.hidden = false;
+    }
+
+    async function submitMonitor(event) {
+        event.preventDefault();
+        $('monitorError').hidden = true;
+        let form;
+        try {
+            form = collectMonitorForm();
+        } catch (e) {
+            showMonitorFormError('自訂 header 不是合法的 JSON：' + e.message);
+            return;
+        }
+
+        const btn = $('monitorSave');
+        btn.disabled = true; btn.textContent = '儲存中…';
+        try {
+            if (editingMonitor) {
+                const updated = await call('/monitors/' + editingMonitor.id,
+                    { method: 'PUT', body: JSON.stringify(form) });
+                toast(`已更新 ${updated.name}`);
+            } else {
+                const created = await call('/monitors', { method: 'POST', body: JSON.stringify(form) });
+                toast(`已建立 ${created.name}`);
+            }
+            $('monitorDialog').close();
+            await loadMonitors();
+        } catch (e) {
+            showMonitorFormError(e.message);
+        } finally { btn.disabled = false; btn.textContent = '儲存'; }
+    }
+
+    // ---- 立即測試：關鍵 UX，沒有它設 JsonPointer 等於盲猜 ----
+
+    async function testMonitorNow() {
+        let form;
+        try {
+            form = collectMonitorForm();
+        } catch (e) {
+            showMonitorFormError('自訂 header 不是合法的 JSON：' + e.message);
+            return;
+        }
+        // /monitors/test 不吃 clientId/interval/enabled 等排程/發送欄位——試跑不建立
+        // 排程、不綁定 client、更不會發送，只帶抓取＋解析＋渲染需要的部分。
+        const body = {
+            name: form.name || null,
+            url: form.url,
+            method: form.method,
+            requestBody: form.requestBody,
+            headers: form.headers,
+            compareMode: form.compareMode,
+            extractRules: form.extractRules,
+            itemPointer: form.itemPointer,
+            itemKeyPointer: form.itemKeyPointer,
+            messageTemplate: form.messageTemplate,
+        };
+
+        const btn = $('monTestBtn');
+        btn.disabled = true; btn.textContent = '測試中…';
+        const box = $('monTestResult');
+        box.hidden = false;
+        box.replaceChildren(el('div', 'loading', '測試中…'));
+        try {
+            const result = await call('/monitors/test', { method: 'POST', body: JSON.stringify(body) });
+            renderMonitorTestResult(result);
+        } catch (e) {
+            box.replaceChildren(el('div', 'notice notice--error', e.message));
+        } finally { btn.disabled = false; btn.textContent = '立即測試'; }
+    }
+
+    function renderMonitorTestResult(result) {
+        const box = $('monTestResult');
+        box.replaceChildren();
+
+        if (!result.ok) {
+            const detail = `${result.failureReason || '失敗'}`
+                + (result.httpStatus ? `（HTTP ${result.httpStatus}）` : '')
+                + `：${result.failureDetail || ''}`;
+            box.append(el('div', 'notice notice--error', detail));
+            return;
+        }
+
+        const okMsg = '抓取成功' + (result.httpStatus ? `（HTTP ${result.httpStatus}）` : '') + '。';
+        box.append(el('div', 'notice notice--success', okMsg));
+
+        const valueKeys = Object.keys(result.values || {});
+        if (valueKeys.length) {
+            box.append(el('p', 'fieldset-label', '抽取到的值'));
+            const list = el('ul', 'tag-set');
+            valueKeys.forEach((k) => list.append(
+                el('li', 'scope', `${k} = ${result.values[k] == null ? '—' : result.values[k]}`)));
+            box.append(list);
+        }
+
+        if (result.items && result.items.length) {
+            box.append(el('p', 'fieldset-label', `項目預覽（共 ${result.items.length} 筆，最多顯示前 5 筆）`));
+            const table = el('table', 'grid');
+            const thead = el('thead'); const htr = el('tr');
+            htr.append(th('鍵'), th('欄位'));
+            thead.append(htr); table.append(thead);
+            const tb = el('tbody');
+            result.items.slice(0, 5).forEach((item) => {
+                const tr = el('tr');
+                tr.append(tdMono(item.itemKey));
+                const fieldKeys = Object.keys(item.fields || {});
+                const text = fieldKeys.map((k) => `${k}=${item.fields[k]}`).join(', ');
+                tr.append(td(text || '—'));
+                tb.append(tr);
+            });
+            table.append(tb);
+            const wrap = el('div', 'table-wrap'); wrap.append(table);
+            box.append(wrap);
+        }
+
+        box.append(el('p', 'fieldset-label', '渲染後的訊息'));
+        const pre = el('pre', 'test-message');
+        pre.textContent = result.renderedMessage || '（空）';
+        box.append(pre);
+    }
+
+    // ---- 執行紀錄 ----
+
+    async function openMonitorRuns(m) {
+        $('monitorRunsSubtitle').textContent = m.name;
+        const body = $('monitorRunsBody');
+        body.replaceChildren(el('div', 'loading', '載入中…'));
+        $('monitorRunsDialog').showModal();
+        try {
+            const rows = await call('/monitors/' + m.id + '/runs');
+            renderMonitorRuns(rows);
+        } catch (e) {
+            body.replaceChildren(el('div', 'notice notice--error', e.message));
+        }
+    }
+
+    function renderMonitorRuns(rows) {
+        const body = $('monitorRunsBody');
+        body.replaceChildren();
+        if (!rows.length) {
+            body.append(el('div', 'empty', '還沒有任何執行紀錄。'));
+            return;
+        }
+        const table = el('table', 'grid');
+        const thead = el('thead'); const htr = el('tr');
+        ['時間', '結果', 'HTTP', '耗時', '錯誤'].forEach((h) => htr.append(th(h)));
+        thead.append(htr); table.append(thead);
+        const tb = el('tbody');
+        rows.forEach((r) => {
+            const tr = el('tr');
+            tr.append(td(fmtTime(r.startedAt)));
+            const s = el('td');
+            s.append(el('span', 'tag ' + (RUN_OUTCOME_TAG[r.outcome] || 'tag--muted'), r.outcome));
+            tr.append(s);
+            tr.append(tdNum(r.httpStatus != null ? r.httpStatus : '—'));
+            tr.append(tdNum(r.durationMs != null ? r.durationMs + 'ms' : '—'));
+            tr.append(td(r.errorMessage || '—'));
+            tb.append(tr);
+        });
+        table.append(tb);
+        const wrap = el('div', 'table-wrap'); wrap.append(table);
+        body.append(wrap);
+    }
+
     // ------------------------------------------------------------ 小工具
 
     function td(text) { return el('td', null, text); }
@@ -662,6 +1037,15 @@
     $('sendForm').addEventListener('submit', submitSend);
 
     $('detailClose').addEventListener('click', () => $('detailDialog').close());
+
+    $('newMonitorBtn').addEventListener('click', openMonitorCreate);
+    $('monAddRule').addEventListener('click', () => addRuleRow('', ''));
+    $('monMethod').addEventListener('change', syncMonitorMethod);
+    $('monCompareMode').addEventListener('change', syncMonitorCompareMode);
+    $('monitorForm').addEventListener('submit', submitMonitor);
+    $('monitorCancel').addEventListener('click', () => $('monitorDialog').close());
+    $('monTestBtn').addEventListener('click', testMonitorNow);
+    $('monitorRunsClose').addEventListener('click', () => $('monitorRunsDialog').close());
 
     $('logoutForm').addEventListener('submit', (e) => {
         const t = csrfToken();

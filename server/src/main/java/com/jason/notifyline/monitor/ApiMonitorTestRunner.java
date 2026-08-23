@@ -1,0 +1,162 @@
+package com.jason.notifyline.monitor;
+
+import com.jason.notifyline.common.ApiException;
+import com.jason.notifyline.monitor.domain.CompareMode;
+import com.jason.notifyline.monitor.domain.ExtractRule;
+import com.jason.notifyline.monitor.fetch.ApiFetcher;
+import com.jason.notifyline.monitor.fetch.FetchResult;
+import com.jason.notifyline.monitor.fetch.OutboundUrlGuard;
+import com.jason.notifyline.monitor.parse.ChangeDetector;
+import com.jason.notifyline.monitor.parse.ChangeResult;
+import com.jason.notifyline.monitor.parse.MessageTemplate;
+import org.springframework.stereotype.Service;
+
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * 後台「立即測試」（{@code POST /admin/api/monitors/test}）背後的試跑邏輯。見
+ * {@code Docs/plan/11-API監控輪詢設計.md} §10、§11：「沒有這個，設 JsonPointer 等於盲猜」。
+ *
+ * <h2>必須走跟 {@link ApiMonitorRunner} 完全相同的 guard + fetch 路徑</h2>
+ *
+ * <p>這是<strong>安全關鍵</strong>：試跑的網址是管理者當下在表單裡打的，可能還沒存檔、
+ * 也可能是編輯中還沒送出的內容——如果這裡跳過 {@link OutboundUrlGuard} 或用不同的
+ * fetch 邏輯，一個已通過 session 認證的管理端點就變成一個完整的 SSRF 入口：
+ * 比沒有 guard 更糟，因為它看起來像有防護。所以這裡的建構子直接注入跟
+ * {@link ApiMonitorRunner} 同一顆 {@link OutboundUrlGuard} / {@link ApiFetcher} bean，
+ * 不自己另外組一份 HttpClient。
+ *
+ * <h2>用「首次執行」語意重用 {@link ChangeDetector}，不重寫抽值邏輯</h2>
+ *
+ * <p>試跑沒有「上一次」可以比較——{@code previousFingerprint = null} 對
+ * {@code detectByFingerprint} 來說剛好就是「首次執行」，回傳的
+ * {@link ChangeResult.Unchanged} 帶著這次抽出的 {@code currentValues}，正是試跑要秀給
+ * 使用者看的東西。{@code NEW_ITEMS} 模式同理：{@code seenKeys = Set.of()} +
+ * {@code firstRun = true} 讓 {@code detectNewItems} 把陣列裡的每個元素都當成「新項目」
+ * 回傳，用來預覽 {@code item_pointer} / {@code item_key_pointer} 抓不抓得到東西，而不是
+ * 真的要拿去跟 {@code seen_item} 表比對。兩條路徑都不會寫入任何資料庫狀態，也不會呼叫
+ * {@code ChangeDetector} 以外、需要 repository 的任何東西。
+ *
+ * <h2>絕不送出任何通知</h2>
+ *
+ * <p>這裡完全沒有注入 {@code NotificationService} 或 {@code ApiMonitorStore}——不是刻意
+ * 「不呼叫」，而是連可以呼叫的依賴都不存在，杜絕日後不小心加一行 {@code submit(...)}
+ * 就讓試跑變成真的發送。
+ */
+@Service
+public class ApiMonitorTestRunner {
+
+    /** NEW_ITEMS 模式一則訊息最多列這麼多筆，其餘寫「還有 N 筆」——規則同 {@code ApiMonitorRunner}。 */
+    private static final int MAX_ITEMS_PER_MESSAGE = 20;
+
+    private final OutboundUrlGuard guard;
+    private final ApiFetcher fetcher;
+    private final ChangeDetector changeDetector;
+    private final MessageTemplate messageTemplate;
+
+    public ApiMonitorTestRunner(OutboundUrlGuard guard,
+                                ApiFetcher fetcher,
+                                ChangeDetector changeDetector,
+                                MessageTemplate messageTemplate) {
+        this.guard = guard;
+        this.fetcher = fetcher;
+        this.changeDetector = changeDetector;
+        this.messageTemplate = messageTemplate;
+    }
+
+    public MonitorTestOutcome run(TestConfig config) {
+        try {
+            guard.check(config.uri());
+        } catch (OutboundUrlGuard.BlockedException e) {
+            return new MonitorTestOutcome.Blocked(e.getMessage());
+        }
+
+        FetchResult fetchResult = fetcher.fetch(new ApiFetcher.FetchRequest(
+                config.uri(), config.method(), config.requestBody(), config.headers()));
+        if (fetchResult instanceof FetchResult.Failure failure) {
+            return new MonitorTestOutcome.FetchFailed(
+                    failure.reason().name(), failure.detail(), failure.httpStatus());
+        }
+        FetchResult.Success success = (FetchResult.Success) fetchResult;
+
+        try {
+            return config.compareMode() == CompareMode.NEW_ITEMS
+                    ? previewNewItems(config, success)
+                    : previewFingerprintMode(config, success);
+        } catch (ApiException e) {
+            // 理由同 ApiMonitorRunner.execute 的 PARSE_ERROR 分支：不可用 e.getMessage()，
+            // Jackson 的解析例外訊息常夾帶原始 JSON 片段，那就是目標 API 的回應內容。
+            return new MonitorTestOutcome.ParseFailed("body length=" + success.body().length());
+        }
+    }
+
+    private MonitorTestOutcome.Success previewFingerprintMode(TestConfig config, FetchResult.Success success) {
+        ChangeResult result = changeDetector.detectByFingerprint(
+                config.compareMode(), success.body(), config.extractRules(), null, null);
+        String message = messageTemplate.render(config.messageTemplate(), new MessageTemplate.RenderContext(
+                config.name(), result.currentValues(), Map.of(), Map.of()));
+        return new MonitorTestOutcome.Success(success.httpStatus(), result.currentValues(), List.of(), message);
+    }
+
+    private MonitorTestOutcome.Success previewNewItems(TestConfig config, FetchResult.Success success) {
+        ChangeResult result = changeDetector.detectNewItems(
+                success.body(), config.itemPointer(), config.itemKeyPointer(),
+                config.extractRules(), Set.of(), true);
+        List<ChangeResult.NewItem> items = result.newItems();
+        List<MonitorTestOutcome.ItemPreview> preview = items.stream()
+                .map(item -> new MonitorTestOutcome.ItemPreview(item.itemKey(), item.fields()))
+                .toList();
+        return new MonitorTestOutcome.Success(
+                success.httpStatus(), Map.of(), preview, buildNewItemsMessage(config, items));
+    }
+
+    /** 組裝規則抄 {@code ApiMonitorRunner.buildNewItemsMessage}：最多 20 筆，其餘寫「還有 N 筆」。 */
+    private String buildNewItemsMessage(TestConfig config, List<ChangeResult.NewItem> items) {
+        if (items.isEmpty()) {
+            return "";
+        }
+        int included = Math.min(items.size(), MAX_ITEMS_PER_MESSAGE);
+        List<String> lines = new ArrayList<>(included);
+        for (int i = 0; i < included; i++) {
+            ChangeResult.NewItem item = items.get(i);
+            lines.add(messageTemplate.render(config.messageTemplate(),
+                    new MessageTemplate.RenderContext(config.name(), Map.of(), Map.of(), item.fields())));
+        }
+        StringBuilder text = new StringBuilder(String.join("\n", lines));
+        int remaining = items.size() - included;
+        if (remaining > 0) {
+            text.append("\n還有 ").append(remaining).append(" 筆");
+        }
+        return text.toString();
+    }
+
+    /**
+     * 試跑用的設定快照，形狀類似 {@link ClaimedMonitor} 但刻意是獨立型別——這份設定
+     * 可能根本沒存過檔（{@code POST /monitors/test} 的整個重點），硬塞進
+     * {@link ClaimedMonitor}（語意是「已從資料庫取件」）只會誤導讀者。
+     *
+     * @param name 供 {@code {{monitor.name}}} 使用；未命名的草稿也要能測試，呼叫端
+     *             （{@code AdminService}）在名稱空白時代入一個佔位字串
+     */
+    public record TestConfig(
+            String name,
+            URI uri,
+            String method,
+            String requestBody,
+            Map<String, String> headers,
+            CompareMode compareMode,
+            List<ExtractRule> extractRules,
+            String itemPointer,
+            String itemKeyPointer,
+            String messageTemplate) {
+
+        public TestConfig {
+            headers = headers == null ? Map.of() : Map.copyOf(headers);
+            extractRules = extractRules == null ? List.of() : List.copyOf(extractRules);
+        }
+    }
+}
