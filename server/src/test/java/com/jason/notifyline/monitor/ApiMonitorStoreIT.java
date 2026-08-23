@@ -278,7 +278,7 @@ class ApiMonitorStoreIT extends PostgresIntegrationTest {
     // ---------------------------------------------------------------- 失敗通知 + 恢復
 
     @Test
-    @DisplayName("連續失敗只通知一次；下次成功時補發恢復通知")
+    @DisplayName("連續失敗只通知一次；下次成功時補發恢復通知；兩則通知的 id 都記在各自的 run 列上（修正 #3）")
     void recordFailure_notifiesOnceAcrossFailures_recoveryOnNextSuccess() {
         ApiMonitor monitor = saveMonitor("flaky", CompareMode.WHOLE_BODY, null, null, 0, null);
         int threshold = properties.failureNotifyThreshold();
@@ -289,11 +289,16 @@ class ApiMonitorStoreIT extends PostgresIntegrationTest {
         assertThat(monitors.findById(monitor.getId()).orElseThrow().isFailureNotified()).isTrue();
         long afterThresholdCount = notifications.count();
         assertThat(afterThresholdCount).isEqualTo(1);
+        // 修正 #3：達門檻那一輪的 FAILED run 要記下失敗通知的 id，不再是 null。
+        ApiMonitorRun failureRun = latestRun(monitor.getId());
+        assertThat(failureRun.getOutcome()).isEqualTo(RunOutcome.FAILED);
+        assertThat(failureRun.getNotificationId()).as("失敗通知的 id 要記在觸發它的那一列 run 上").isNotNull();
 
-        // 再失敗幾次，不該再通知
+        // 再失敗幾次，不該再通知，這幾列 run 的 notification_id 也理當是 null
         store.recordFailure(claimOne(monitor.getId()), failureAttempt());
         store.recordFailure(claimOne(monitor.getId()), failureAttempt());
         assertThat(notifications.count()).as("同一次故障只通知一次").isEqualTo(afterThresholdCount);
+        assertThat(latestRun(monitor.getId()).getNotificationId()).isNull();
 
         // 成功：failure_notified 歸零，且補發一則恢復通知
         store.recordSuccess(claimOne(monitor.getId()), unchangedAttempt());
@@ -301,10 +306,15 @@ class ApiMonitorStoreIT extends PostgresIntegrationTest {
         assertThat(recovered.isFailureNotified()).isFalse();
         assertThat(recovered.getConsecutiveFailures()).isZero();
         assertThat(notifications.count()).as("失敗通知 + 恢復通知，總共兩則").isEqualTo(afterThresholdCount + 1);
+        // 修正 #3：這一輪 outcome=UNCHANGED（沒有變更通知搶走欄位），恢復通知的 id 記在這裡。
+        ApiMonitorRun recoveryRun = latestRun(monitor.getId());
+        assertThat(recoveryRun.getOutcome()).isEqualTo(RunOutcome.UNCHANGED);
+        assertThat(recoveryRun.getNotificationId()).as("恢復通知的 id 要記在補發它的那一列 run 上").isNotNull();
+        assertThat(recoveryRun.getNotificationId()).isNotEqualTo(failureRun.getNotificationId());
     }
 
     @Test
-    @DisplayName("失敗次數未達門檻前不通知")
+    @DisplayName("失敗次數未達門檻前不通知，run 列的 notification_id 維持 null")
     void recordFailure_belowThreshold_doesNotNotify() {
         ApiMonitor monitor = saveMonitor("still-ok", CompareMode.WHOLE_BODY, null, null, 0, null);
 
@@ -312,7 +322,9 @@ class ApiMonitorStoreIT extends PostgresIntegrationTest {
 
         assertThat(monitors.findById(monitor.getId()).orElseThrow().isFailureNotified()).isFalse();
         assertThat(notifications.count()).isZero();
-        assertThat(latestRun(monitor.getId()).getOutcome()).isEqualTo(RunOutcome.FAILED);
+        ApiMonitorRun run = latestRun(monitor.getId());
+        assertThat(run.getOutcome()).isEqualTo(RunOutcome.FAILED);
+        assertThat(run.getNotificationId()).isNull();
     }
 
     // ---------------------------------------------------------------- NEW_ITEMS 首次執行

@@ -239,13 +239,21 @@ public class ApiMonitorStore {
         int effectiveInterval = effectiveIntervalSeconds(monitor);
         monitor.recordSuccess(now, effectiveInterval);
 
+        UUID recoveryNotificationId = null;
         if (wasFailureNotified) {
-            sendRecoveryNotification(monitor, now);
+            recoveryNotificationId = sendRecoveryNotification(monitor, now);
         }
 
+        // 一列 api_monitor_run 只有一個 notification_id 欄位，但同一次成功執行理論上
+        // 可能同時符合「變更通知」與「恢復通知」兩種條件（例如目標故障了幾輪、
+        // 復原時剛好抓到的內容也變了）。變更通知優先——它是這次執行「抓到什麼」的
+        // 直接結果，恢復通知只是附帶的故障狀態通報；CHANGED 時 notificationId 恆非
+        // null，兩者不會真的互相覆蓋掉彼此的資訊（恢復通知本身仍然送出去了，
+        // 只是這一列 run 紀錄不是它的主要歸屬）。
+        UUID runNotificationId = outcome == RunOutcome.CHANGED ? notificationId : recoveryNotificationId;
+
         runs.save(new ApiMonitorRun(monitor.getId(), attempt.startedAt(), attempt.durationMs(),
-                outcome, attempt.httpStatus(), null,
-                outcome == RunOutcome.CHANGED ? notificationId : null));
+                outcome, attempt.httpStatus(), null, runNotificationId));
     }
 
     /**
@@ -296,15 +304,19 @@ public class ApiMonitorStore {
         return notificationId;
     }
 
-    private void sendRecoveryNotification(ApiMonitor monitor, Instant now) {
-        activeClient(monitor.getClientId(), monitor.getId()).ifPresent(client -> {
-            String text = messageTemplate.render(RECOVERY_TEMPLATE, MessageTemplate.RenderContext.of(monitor.getName()));
-            try {
-                submit(client, text, "monitor-recovery-" + monitor.getId());
-            } catch (ApiException e) {
-                log.warn("恢復通知送出失敗：monitorId={} code={}", monitor.getId(), e.getCode());
-            }
-        });
+    /** @return 送出成功的恢復通知 id；client 不可用或 {@code submit()} 失敗時為 {@code null}。 */
+    private UUID sendRecoveryNotification(ApiMonitor monitor, Instant now) {
+        Optional<Client> client = activeClient(monitor.getClientId(), monitor.getId());
+        if (client.isEmpty()) {
+            return null;
+        }
+        String text = messageTemplate.render(RECOVERY_TEMPLATE, MessageTemplate.RenderContext.of(monitor.getName()));
+        try {
+            return submit(client.get(), text, "monitor-recovery-" + monitor.getId());
+        } catch (ApiException e) {
+            log.warn("恢復通知送出失敗：monitorId={} code={}", monitor.getId(), e.getCode());
+            return null;
+        }
     }
 
     private void persistSeenItems(Long monitorId, List<ChangeResult.NewItem> items, Instant now) {
@@ -334,21 +346,21 @@ public class ApiMonitorStore {
         int effectiveInterval = effectiveIntervalSeconds(monitor);
         monitor.recordFailure(now, effectiveInterval);
 
+        UUID failureNotificationId = null;
         if (monitor.isNotifyOnFailure() && monitor.shouldNotifyFailure(properties.failureNotifyThreshold())) {
-            boolean sent = activeClient(monitor.getClientId(), monitor.getId())
+            failureNotificationId = activeClient(monitor.getClientId(), monitor.getId())
                     .map(client -> {
                         String text = messageTemplate.render(
                                 FAILURE_TEMPLATE, MessageTemplate.RenderContext.of(monitor.getName()));
                         try {
-                            submit(client, text, "monitor-failure-" + monitor.getId());
-                            return true;
+                            return submit(client, text, "monitor-failure-" + monitor.getId());
                         } catch (ApiException e) {
                             log.warn("失敗通知送出失敗：monitorId={} code={}", monitor.getId(), e.getCode());
-                            return false;
+                            return null;
                         }
                     })
-                    .orElse(false);
-            if (sent) {
+                    .orElse(null);
+            if (failureNotificationId != null) {
                 monitor.markFailureNotified();
             }
         }
@@ -358,11 +370,11 @@ public class ApiMonitorStore {
                         + (isBlank(attempt.detail()) ? "" : ": " + attempt.detail()),
                 MAX_ERROR_MESSAGE_LENGTH);
 
-        // notification_id 只在 outcome=CHANGED 時有值（見 migration 欄位註解），
-        // 失敗通知即使送出成功也不記在這裡——它不是「這次執行的結果」，
-        // 是「這次故障」這個更長時間範圍的事件，run 紀錄是逐次的。
+        // notification_id：這一列本身就是「這次故障」的執行紀錄，達門檻送出的失敗通知
+        // 就記在它自己這一列——不像 W3 原本以為的那樣要等到另一種「事件」才有值。
+        // 見 migration 對這個欄位更新後的註解。
         runs.save(new ApiMonitorRun(monitor.getId(), attempt.startedAt(), attempt.durationMs(),
-                RunOutcome.FAILED, attempt.httpStatus(), errorMessage, null));
+                RunOutcome.FAILED, attempt.httpStatus(), errorMessage, failureNotificationId));
     }
 
     // -------------------------------------------------------------- 共用

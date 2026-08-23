@@ -9,6 +9,16 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+  datasource:
+    hikari:
+      # 每個不同的 @DynamicPropertySource / bean 覆寫組合，Spring Test 都會快取成獨立的
+      # ApplicationContext，各自持有一個 Hikari pool，且直到 JVM 結束都不會關閉。
+      # IT 測試類別數量成長後，全部 pool 疊加很容易超過 Postgres 測試容器的
+      # max_connections 預設值（"FATAL: sorry, too many clients already"）。
+      # 這裡沒有任何一個測試需要超過 2 個併發連線（見 ApiMonitorStoreIT 的併發 claim 測試），
+      # 縮小上限只影響資源占用，不影響測試語意。
+      maximum-pool-size: 4
+      minimum-idle: 1
 
 line:
   bot:

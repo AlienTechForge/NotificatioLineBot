@@ -5,13 +5,21 @@ import com.jason.notifyline.client.ClientService;
 import com.jason.notifyline.client.Scope;
 import com.jason.notifyline.common.TargetType;
 import com.jason.notifyline.lineuser.LineUser;
+import com.jason.notifyline.monitor.MonitorTestOutcome;
+import com.jason.notifyline.monitor.domain.ApiMonitor;
+import com.jason.notifyline.monitor.domain.ApiMonitorRun;
+import com.jason.notifyline.monitor.domain.CompareMode;
+import com.jason.notifyline.monitor.domain.ExtractRule;
 import com.jason.notifyline.notification.domain.Notification;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 管理端點的資料形狀。
@@ -255,6 +263,230 @@ public final class AdminDto {
                     n.getTargetType().name(),
                     n.getRecipientCount(),
                     n.getScheduledAt());
+        }
+    }
+
+    // ============================================================ 監控（W4）
+
+    /**
+     * 監控清單一列，同時也是後台編輯抽屜的預填資料。<strong>刻意不含</strong>
+     * {@code headers_ciphertext}、{@code headers_iv} 或解密後的 header 值——理由同類別
+     * 註解：{@code hasHeaders} 只說「有沒有設定」，不透露內容。
+     */
+    public record MonitorSummary(
+            Long id,
+            String name,
+            String clientId,
+            String clientName,
+            String url,
+            String host,
+            String method,
+            String requestBody,
+            boolean hasHeaders,
+            int intervalSeconds,
+            boolean enabled,
+            CompareMode compareMode,
+            List<ExtractRule> extractRules,
+            String itemPointer,
+            String itemKeyPointer,
+            String messageTemplate,
+            boolean notifyOnFailure,
+            int cooldownSeconds,
+            Integer maxNotificationsPerDay,
+            int consecutiveFailures,
+            boolean failureNotified,
+            Instant lastRunAt,
+            Instant nextRunAt,
+            Instant createdAt) {
+
+        public static MonitorSummary from(ApiMonitor m, String clientId, String clientName,
+                                          List<ExtractRule> extractRules) {
+            return new MonitorSummary(
+                    m.getId(), m.getName(), clientId, clientName, m.getUrl(), hostOf(m.getUrl()), m.getMethod(),
+                    m.getRequestBody(), m.getHeadersCiphertext() != null, m.getIntervalSeconds(), m.isEnabled(),
+                    m.getCompareMode(), extractRules, m.getItemPointer(), m.getItemKeyPointer(),
+                    m.getMessageTemplate(), m.isNotifyOnFailure(), m.getCooldownSeconds(),
+                    m.getMaxNotificationsPerDay(), m.getConsecutiveFailures(), m.isFailureNotified(),
+                    m.getLastRunAt(), m.getNextRunAt(), m.getCreatedAt());
+        }
+
+        /** 列表要顯示的是目標 host，不是完整網址（可能帶查詢字串）。解析不出來就顯示 null，前端自行代換。 */
+        private static String hostOf(String url) {
+            try {
+                return URI.create(url).getHost();
+            } catch (IllegalArgumentException e) {
+                return null;
+            }
+        }
+    }
+
+    /**
+     * 建立監控。
+     *
+     * @param headers null 或空 map = 這個監控沒有自訂 header（不同於編輯時「留空 = 不變更」——
+     *                建立當下根本沒有「既有值」可以不變更）
+     * @param enabled null 預設 true
+     */
+    public record CreateMonitorRequest(
+            @NotBlank(message = "name is required")
+            @Size(max = 100, message = "name must be at most 100 characters") String name,
+
+            @NotBlank(message = "clientId is required") String clientId,
+
+            @NotBlank(message = "url is required") String url,
+
+            String method,
+
+            String requestBody,
+
+            Map<String, String> headers,
+
+            int intervalSeconds,
+
+            Boolean enabled,
+
+            @NotNull(message = "compareMode is required") CompareMode compareMode,
+
+            List<ExtractRule> extractRules,
+
+            String itemPointer,
+
+            String itemKeyPointer,
+
+            @NotBlank(message = "messageTemplate is required") String messageTemplate,
+
+            Boolean notifyOnFailure,
+
+            Integer cooldownSeconds,
+
+            Integer maxNotificationsPerDay) {
+    }
+
+    /**
+     * 更新監控（整份取代語意，PUT）。
+     *
+     * @param headers null 或空 map = <strong>不變更</strong>既有 header；非空 = 整份覆寫。
+     *                沒有「明確清除」的表示法——真的要清掉自訂 header，目前只能作廢重建
+     */
+    public record UpdateMonitorRequest(
+            @NotBlank(message = "name is required")
+            @Size(max = 100, message = "name must be at most 100 characters") String name,
+
+            @NotBlank(message = "clientId is required") String clientId,
+
+            @NotBlank(message = "url is required") String url,
+
+            String method,
+
+            String requestBody,
+
+            Map<String, String> headers,
+
+            int intervalSeconds,
+
+            Boolean enabled,
+
+            @NotNull(message = "compareMode is required") CompareMode compareMode,
+
+            List<ExtractRule> extractRules,
+
+            String itemPointer,
+
+            String itemKeyPointer,
+
+            @NotBlank(message = "messageTemplate is required") String messageTemplate,
+
+            Boolean notifyOnFailure,
+
+            Integer cooldownSeconds,
+
+            Integer maxNotificationsPerDay) {
+    }
+
+    /** 啟用／停用。 */
+    public record SetEnabledRequest(boolean enabled) {
+    }
+
+    /**
+     * 試跑：body 帶完整設定，<strong>未存檔也可</strong>。刻意沒有 {@code clientId}、
+     * {@code intervalSeconds} 等排程/發送相關欄位——試跑不建立排程、不綁定 client、
+     * 更不會發送，這些欄位對它沒有意義。
+     */
+    public record MonitorTestRequest(
+            String name,
+
+            @NotBlank(message = "url is required") String url,
+
+            String method,
+
+            String requestBody,
+
+            Map<String, String> headers,
+
+            @NotNull(message = "compareMode is required") CompareMode compareMode,
+
+            List<ExtractRule> extractRules,
+
+            String itemPointer,
+
+            String itemKeyPointer,
+
+            @NotBlank(message = "messageTemplate is required") String messageTemplate) {
+    }
+
+    /**
+     * 試跑結果。<strong>絕不含目標 API 的原始回應內容</strong>——只有抽出的值、
+     * {@code NEW_ITEMS} 模式的項目預覽，與渲染後的訊息文字。見 {@link MonitorTestOutcome}。
+     *
+     * @param ok            true = 抓取與解析都成功（不代表「有變更」——試跑沒有比對基準）
+     * @param failureReason ok=false 時的分類：{@code BLOCKED_URL}、{@code PARSE_ERROR}，
+     *                       或 {@code FetchResult.Reason} 的名稱（{@code TIMEOUT} 等）
+     */
+    public record MonitorTestResult(
+            boolean ok,
+            Integer httpStatus,
+            String failureReason,
+            String failureDetail,
+            Map<String, String> values,
+            List<ItemPreview> items,
+            String renderedMessage) {
+
+        public record ItemPreview(String itemKey, Map<String, String> fields) {
+            public static ItemPreview from(MonitorTestOutcome.ItemPreview p) {
+                return new ItemPreview(p.itemKey(), p.fields());
+            }
+        }
+
+        public static MonitorTestResult from(MonitorTestOutcome outcome) {
+            return switch (outcome) {
+                case MonitorTestOutcome.Blocked b -> new MonitorTestResult(
+                        false, null, "BLOCKED_URL", b.message(), Map.of(), List.of(), null);
+                case MonitorTestOutcome.FetchFailed f -> new MonitorTestResult(
+                        false, f.httpStatus(), f.reason(), f.detail(), Map.of(), List.of(), null);
+                case MonitorTestOutcome.ParseFailed p -> new MonitorTestResult(
+                        false, null, "PARSE_ERROR", p.detail(), Map.of(), List.of(), null);
+                case MonitorTestOutcome.Success s -> new MonitorTestResult(
+                        true, s.httpStatus(), null, null, s.values(),
+                        s.items().stream().map(ItemPreview::from).toList(), s.renderedMessage());
+            };
+        }
+    }
+
+    /** 單筆監控最近 50 筆執行紀錄的一列。 */
+    public record MonitorRunSummary(
+            Long id,
+            Instant startedAt,
+            Integer durationMs,
+            String outcome,
+            Integer httpStatus,
+            String errorMessage,
+            String notificationId) {
+
+        public static MonitorRunSummary from(ApiMonitorRun r) {
+            return new MonitorRunSummary(
+                    r.getId(), r.getStartedAt(), r.getDurationMs(), r.getOutcome().name(),
+                    r.getHttpStatus(), r.getErrorMessage(),
+                    r.getNotificationId() == null ? null : r.getNotificationId().toString());
         }
     }
 }
