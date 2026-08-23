@@ -447,17 +447,17 @@ fieldset { border: none; margin: 0; padding: 0; }
 
 /* ---------------------------------------------------------------- 對話框 */
 
+dialog:not([open]) { display: none; }
 dialog {
     position: fixed; inset-block: 0; inset-inline-start: auto; inset-inline-end: 0; margin: 0;
     border: none; border-inline-start: 1px solid var(--c-border-strong); border-radius: 0;
     background: var(--c-surface-solid); color: var(--c-fg); padding: 0;
     width: min(460px, 100vw);
     height: 100dvh; max-height: 100dvh;
-    display: flex; flex-direction: column;
     box-shadow: var(--shadow-lg);
 }
 dialog.dialog--wide { width: min(760px, 100vw); }
-dialog[open] { animation: drawer-in var(--motion-slow) both; }
+dialog[open] { display: flex; flex-direction: column; animation: drawer-in var(--motion-slow) both; }
 @keyframes drawer-in {
     from { opacity: 0; transform: translateX(24px); }
     to   { opacity: 1; transform: none; }
