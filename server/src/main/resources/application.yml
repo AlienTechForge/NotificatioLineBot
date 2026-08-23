@@ -87,6 +87,23 @@ app:
     # 同一批。必須明顯長於一次 LINE 呼叫的最壞耗時。
     lease: ${APP_DISPATCH_LEASE:PT2M}
 
+  # API 監控輪詢（T11）。見 11-API監控輪詢設計 §9。獨立執行緒池與排程，
+  # 不共用派送器的 —— 一個慢掉的第三方 API 不該拖慢 LINE 發送。
+  monitor:
+    enabled: ${APP_MONITOR_ENABLED:true}
+    poll-interval: ${APP_MONITOR_POLL_INTERVAL:PT10S}
+    claim-limit: ${APP_MONITOR_CLAIM_LIMIT:5}
+    lease: ${APP_MONITOR_LEASE:PT2M}
+    min-interval: ${APP_MONITOR_MIN_INTERVAL:PT60S}
+    connect-timeout: ${APP_MONITOR_CONNECT_TIMEOUT:PT5S}
+    read-timeout: ${APP_MONITOR_READ_TIMEOUT:PT10S}
+    max-body-bytes: ${APP_MONITOR_MAX_BODY_BYTES:1048576}
+    # 空 = 允許任何公開網域（仍受 IP 層防護）。填了就只有清單內可打。
+    allowed-hosts: ${APP_MONITOR_ALLOWED_HOSTS:}
+    failure-notify-threshold: ${APP_MONITOR_FAILURE_NOTIFY_THRESHOLD:3}
+    run-retention: ${APP_MONITOR_RUN_RETENTION:P14D}
+    seen-item-retention: ${APP_MONITOR_SEEN_ITEM_RETENTION:P90D}
+
   line:
     api-base-url: ${LINE_API_BASE_URL:https://api.line.me}
     # LINE multicast 上限是 200 req/s，只用一半 —— 另一半留給 webhook 回覆與

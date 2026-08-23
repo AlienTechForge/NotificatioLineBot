@@ -136,4 +136,54 @@ public class AdminController {
         adminService.cancelScheduled(id);
         return ApiResponse.ok(null);
     }
+
+    // -------------------------------------------------------------- 監控
+
+    /** 列表，含執行狀態摘要（啟用狀態、連續失敗次數、最後/下次執行時間）。 */
+    @GetMapping("/monitors")
+    public ApiResponse<List<AdminDto.MonitorSummary>> listMonitors() {
+        return ApiResponse.ok(adminService.listMonitors());
+    }
+
+    @PostMapping("/monitors")
+    public ResponseEntity<ApiResponse<AdminDto.MonitorSummary>> createMonitor(
+            @Valid @RequestBody AdminDto.CreateMonitorRequest body) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(ApiResponse.ok(adminService.createMonitor(body)));
+    }
+
+    @PutMapping("/monitors/{id}")
+    public ApiResponse<AdminDto.MonitorSummary> updateMonitor(
+            @PathVariable Long id, @Valid @RequestBody AdminDto.UpdateMonitorRequest body) {
+        return ApiResponse.ok(adminService.updateMonitor(id, body));
+    }
+
+    @DeleteMapping("/monitors/{id}")
+    public ApiResponse<Void> deleteMonitor(@PathVariable Long id) {
+        adminService.deleteMonitor(id);
+        return ApiResponse.ok(null);
+    }
+
+    /** 啟用／停用。 */
+    @PostMapping("/monitors/{id}/enabled")
+    public ApiResponse<AdminDto.MonitorSummary> setMonitorEnabled(
+            @PathVariable Long id, @RequestBody AdminDto.SetEnabledRequest body) {
+        return ApiResponse.ok(adminService.setMonitorEnabled(id, body.enabled()));
+    }
+
+    /**
+     * 試跑：body 帶完整設定（未存檔也可），抓一次、回傳抽出的值與渲染後的訊息。
+     * 不發送、不寫入任何狀態。走跟排程完全相同的 {@code OutboundUrlGuard} 檢查。
+     */
+    @PostMapping("/monitors/test")
+    public ApiResponse<AdminDto.MonitorTestResult> testMonitor(
+            @Valid @RequestBody AdminDto.MonitorTestRequest body) {
+        return ApiResponse.ok(adminService.testMonitor(body));
+    }
+
+    /** 最近 50 筆執行紀錄。 */
+    @GetMapping("/monitors/{id}/runs")
+    public ApiResponse<List<AdminDto.MonitorRunSummary>> monitorRuns(@PathVariable Long id) {
+        return ApiResponse.ok(adminService.monitorRuns(id));
+    }
 }

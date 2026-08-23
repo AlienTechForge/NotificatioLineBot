@@ -43,6 +43,10 @@
                     <span class="nav__ico"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm14 10v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></svg></span>
                     <span class="label">使用者</span>
                 </a>
+                <a href="#monitors" data-view="monitors">
+                    <span class="nav__ico"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 20V10M18 20V4M6 20v-4"/></svg></span>
+                    <span class="label">監控</span>
+                </a>
             </nav>
         </div>
 
@@ -211,6 +215,28 @@
                     <div id="usersEmpty" class="empty" hidden>還沒有任何 ACTIVE 使用者。請對方先加 Bot 好友。</div>
                 </div>
             </section>
+
+            <!-- 監控 -->
+            <section class="view" id="view-monitors" aria-label="監控" hidden>
+                <div class="card">
+                    <div class="card__head">
+                        <div><h2>API 監控</h2><p>定時打目標 API、比對回應，有變更才通知</p></div>
+                        <button type="button" class="btn btn--primary btn--sm" id="newMonitorBtn">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                            新增監控
+                        </button>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="grid">
+                            <thead><tr>
+                                <th>名稱</th><th>目標</th><th>間隔</th><th>模式</th><th>狀態</th><th>最後執行</th><th><span class="visually-hidden">操作</span></th>
+                            </tr></thead>
+                            <tbody id="monitorRows"></tbody>
+                        </table>
+                    </div>
+                    <div id="monitorsEmpty" class="empty" hidden>還沒有任何監控。點右上角新增第一筆。</div>
+                </div>
+            </section>
         </main>
     </div>
 </div>
@@ -295,6 +321,139 @@
     <div class="dialog__head"><h3 id="detailTitle">發送明細</h3><p id="detailSubtitle"></p></div>
     <div class="dialog__body"><div id="detailBody"></div></div>
     <div class="dialog__foot"><button type="button" class="btn btn--primary" id="detailClose">關閉</button></div>
+</dialog>
+
+<!-- 新增/編輯監控 -->
+<dialog id="monitorDialog" class="dialog--wide" aria-labelledby="monitorTitle">
+    <form method="dialog" id="monitorForm">
+        <div class="dialog__head"><h3 id="monitorTitle">新增監控</h3></div>
+        <div class="dialog__body">
+            <div id="monitorError" class="notice notice--error" role="alert" hidden></div>
+
+            <div class="form-row">
+                <div class="field">
+                    <label for="monName">名稱</label>
+                    <input type="text" id="monName" required maxlength="100" placeholder="例如：訂單狀態監控">
+                </div>
+                <div class="field">
+                    <label for="monClient">以哪組憑證通知</label>
+                    <select id="monClient" required></select>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="field">
+                    <label for="monMethod">方法</label>
+                    <select id="monMethod">
+                        <option value="GET">GET</option>
+                        <option value="POST">POST</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="monInterval">間隔秒數</label>
+                    <input type="number" id="monInterval" min="30" step="1" required placeholder="60">
+                    <p class="hint">實際下限依伺服器設定（app.monitor.min-interval）而定，太低會在儲存時被拒絕。</p>
+                </div>
+            </div>
+
+            <div class="field">
+                <label for="monUrl">目標網址</label>
+                <input type="text" id="monUrl" required placeholder="https://example.com/api/status">
+                <p class="hint">只允許 https，且不可指向內網位址（伺服器端強制檢查）。</p>
+            </div>
+
+            <div class="field" id="monBodyField" hidden>
+                <label for="monBody">request body（選填，POST 用）</label>
+                <textarea id="monBody" placeholder="{&quot;query&quot;:&quot;...&quot;}"></textarea>
+            </div>
+
+            <div class="field">
+                <label for="monHeaders">自訂 header（JSON，選填）</label>
+                <textarea id="monHeaders" placeholder='{"Authorization":"Bearer xxx"}'></textarea>
+                <p class="hint" id="monHeadersHint">格式：扁平的字串對字串 JSON 物件。</p>
+            </div>
+
+            <div class="field">
+                <label for="monCompareMode">比對模式</label>
+                <select id="monCompareMode">
+                    <option value="WHOLE_BODY">WHOLE_BODY（整包比對）</option>
+                    <option value="EXTRACTED">EXTRACTED（比對指定欄位）</option>
+                    <option value="NEW_ITEMS">NEW_ITEMS（只通知新項目）</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <p class="fieldset-label">抽取欄位（JsonPointer，模板用 <code>{{value.NAME}}</code> 引用）</p>
+                <div id="monRulesRows"></div>
+                <button type="button" class="btn btn--sm" id="monAddRule" style="margin-top:var(--sp-2)">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    新增欄位
+                </button>
+            </div>
+
+            <div id="monItemPointerField" hidden>
+                <div class="form-row">
+                    <div class="field">
+                        <label for="monItemPointer">項目陣列位置（item_pointer）</label>
+                        <input type="text" id="monItemPointer" placeholder="/data/items">
+                    </div>
+                    <div class="field">
+                        <label for="monItemKeyPointer">項目鍵位置（item_key_pointer，相對於每個項目）</label>
+                        <input type="text" id="monItemKeyPointer" placeholder="/id">
+                    </div>
+                </div>
+                <p class="hint">上面的抽取欄位在此模式下相對於<strong>每個項目</strong>解讀，模板用 <code>{{item.NAME}}</code> 引用。</p>
+            </div>
+
+            <div class="field">
+                <label for="monTemplate">訊息模板</label>
+                <textarea id="monTemplate" required placeholder="監控「{{monitor.name}}」狀態變成 {{value.status}}（原本 {{old.status}}）"></textarea>
+                <p class="hint">可用 <code>{{value.NAME}}</code> <code>{{old.NAME}}</code> <code>{{item.NAME}}</code> <code>{{monitor.name}}</code> <code>{{now}}</code>。</p>
+            </div>
+
+            <div class="form-row">
+                <div class="field">
+                    <label for="monCooldown">冷卻秒數</label>
+                    <input type="number" id="monCooldown" min="0" step="1" placeholder="0">
+                </div>
+                <div class="field">
+                    <label for="monMaxPerDay">每日通知上限（選填）</label>
+                    <input type="number" id="monMaxPerDay" min="1" step="1" placeholder="留空 = 不限">
+                </div>
+            </div>
+
+            <fieldset class="field">
+                <legend class="fieldset-label">選項</legend>
+                <div class="choices">
+                    <label class="choice"><input type="checkbox" id="monEnabled" checked><span><span class="choice__title">啟用</span></span></label>
+                    <label class="choice"><input type="checkbox" id="monNotifyOnFailure" checked><span><span class="choice__title">連續失敗時通知</span></span></label>
+                </div>
+            </fieldset>
+
+            <div class="field">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3)">
+                    <p class="fieldset-label" style="margin:0">立即測試</p>
+                    <button type="button" class="btn btn--sm" id="monTestBtn">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M5 3l14 9-14 9V3z"/></svg>
+                        立即測試
+                    </button>
+                </div>
+                <p class="hint">用上面目前填寫的設定實際打一次目標 API，不會發送、不會存檔。</p>
+                <div id="monTestResult" hidden></div>
+            </div>
+        </div>
+        <div class="dialog__foot">
+            <button type="button" class="btn" id="monitorCancel">取消</button>
+            <button type="submit" class="btn btn--primary" id="monitorSave">儲存</button>
+        </div>
+    </form>
+</dialog>
+
+<!-- 監控執行紀錄 -->
+<dialog id="monitorRunsDialog" aria-labelledby="monitorRunsTitle">
+    <div class="dialog__head"><h3 id="monitorRunsTitle">執行紀錄</h3><p id="monitorRunsSubtitle"></p></div>
+    <div class="dialog__body"><div id="monitorRunsBody"></div></div>
+    <div class="dialog__foot"><button type="button" class="btn btn--primary" id="monitorRunsClose">關閉</button></div>
 </dialog>
 
 <div class="toast" id="toast" aria-live="polite" aria-atomic="false"></div>
