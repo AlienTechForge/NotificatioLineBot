@@ -748,6 +748,9 @@
         $('monNotifyOnFailure').checked = true;
         $('monHeaders').value = '';
         setRuleRows([]);
+        setSecretsExisting([]);
+        setSecretsNewRows([]);
+        setComputedFieldRows([]);
         clearTestResult();
         syncMonitorMethod();
         syncMonitorCompareMode();
@@ -769,6 +772,9 @@
         $('monInterval').value = m.intervalSeconds;
         $('monCompareMode').value = m.compareMode;
         setRuleRows(m.extractRules || []);
+        setSecretsExisting(m.secretNames || []);
+        setSecretsNewRows([]);
+        setComputedFieldRows(m.computedFields || []);
         $('monItemPointer').value = m.itemPointer || '';
         $('monItemKeyPointer').value = m.itemKeyPointer || '';
         $('monTemplate').value = m.messageTemplate;
@@ -842,6 +848,202 @@
             .filter((r) => r.name || r.pointer);
     }
 
+    // ---- 密鑰（monitor_secret）編輯：doc 13 §7 ----
+
+    /** 已存在的密鑰只顯示名稱＋刪除鈕，絕不顯示值——理由同 monHeadersHint。 */
+    function setSecretsExisting(names) {
+        const box = $('monSecretsExisting');
+        box.replaceChildren();
+        (names || []).forEach((name) => box.append(existingSecretRow(name)));
+    }
+
+    function existingSecretRow(name) {
+        const row = el('div', 'secret-row--existing');
+        const label = el('span');
+        label.append(el('span', 'cell-mono', name), document.createTextNode(' '), el('span', 'tag tag--active', '已設定'));
+        row.append(label);
+        const removeBtn = el('button', 'btn btn--sm btn--danger', '刪除');
+        removeBtn.type = 'button';
+        removeBtn.addEventListener('click', () => deleteExistingSecret(name, row));
+        row.append(removeBtn);
+        return row;
+    }
+
+    /** 刪除是獨立端點、立刻生效（不透過「儲存」）——理由同 sessions 頁的 clearSession，見 doc 13 §7。 */
+    async function deleteExistingSecret(name, row) {
+        if (!editingMonitor) return;
+        if (!confirm(`刪除密鑰「${name}」？此動作不可回復，任何引用它的計算欄位下次輪詢會失敗。`)) return;
+        try {
+            await call('/monitors/' + editingMonitor.id + '/secrets/' + encodeURIComponent(name), { method: 'DELETE' });
+            row.remove();
+            toast(`已刪除密鑰 ${name}`);
+        } catch (e) { toast(e.message, true); }
+    }
+
+    function setSecretsNewRows(rows) {
+        $('monSecretsNewRows').replaceChildren();
+        (rows || []).forEach((r) => addSecretRow(r.name, r.value));
+    }
+
+    function addSecretRow(name, value) {
+        const row = el('div', 'secret-row');
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.placeholder = '名稱（secret.NAME）';
+        nameInput.className = 'secret-row__name';
+        nameInput.value = name || '';
+        const valueInput = document.createElement('input');
+        valueInput.type = 'password';
+        valueInput.placeholder = '值';
+        valueInput.className = 'secret-row__value';
+        valueInput.autocomplete = 'off';
+        valueInput.value = value || '';
+        const removeBtn = el('button', 'btn btn--sm btn--ghost', '移除');
+        removeBtn.type = 'button';
+        removeBtn.addEventListener('click', () => row.remove());
+        row.append(nameInput, valueInput, removeBtn);
+        $('monSecretsNewRows').append(row);
+    }
+
+    /** 只保留有填名稱的列——名稱有填但值留空，代表「不變更既有值」（同 header 的既有慣例，由後端判斷）。 */
+    function collectSecretRows() {
+        const result = {};
+        Array.from($('monSecretsNewRows').querySelectorAll('.secret-row')).forEach((row) => {
+            const name = row.querySelector('.secret-row__name').value.trim();
+            if (!name) return;
+            result[name] = row.querySelector('.secret-row__value').value;
+        });
+        return result;
+    }
+
+    // ---- 計算欄位（computed_fields）編輯：doc 13 §2.2、§4、§7 ----
+
+    const HASH_ALGORITHMS = ['MD5', 'SHA1', 'SHA256', 'SHA512', 'HMAC_SHA1', 'HMAC_SHA256'];
+    const HASH_ENCODINGS = ['HEX_UPPER', 'HEX_LOWER', 'BASE64'];
+
+    function setComputedFieldRows(fields) {
+        $('monComputedRows').replaceChildren();
+        (fields || []).forEach((f) => addComputedFieldBlock(f));
+    }
+
+    function selectEl(cls, options, selected) {
+        const sel = document.createElement('select');
+        sel.className = cls;
+        options.forEach((opt) => {
+            const o = el('option', null, opt);
+            o.value = opt;
+            if (opt === selected) o.selected = true;
+            sel.append(o);
+        });
+        return sel;
+    }
+
+    function addComputedFieldBlock(field) {
+        const block = el('div', 'computed-field');
+
+        const head = el('div', 'computed-field__head');
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.placeholder = '名稱（computed.NAME）';
+        nameInput.className = 'computed-field__name';
+        nameInput.value = (field && field.name) || '';
+        head.append(nameInput);
+        const removeFieldBtn = el('button', 'btn btn--sm btn--ghost', '移除欄位');
+        removeFieldBtn.type = 'button';
+        removeFieldBtn.addEventListener('click', () => block.remove());
+        head.append(removeFieldBtn);
+        block.append(head);
+
+        const inputField = document.createElement('input');
+        inputField.type = 'text';
+        inputField.placeholder = '輸入模板，例如 {{secret.appsecret}}{{now.epochSeconds}}{{secret.deviceid}}';
+        inputField.className = 'computed-field__input';
+        inputField.value = (field && field.input) || '';
+        block.append(inputField);
+
+        const stepsBox = el('div', 'computed-field__steps');
+        block.append(stepsBox);
+        ((field && field.steps) || []).forEach((s) => addStepRow(stepsBox, s));
+
+        const addStepBtn = el('button', 'btn btn--sm', '新增步驟');
+        addStepBtn.type = 'button';
+        addStepBtn.style.marginTop = 'var(--sp-2)';
+        addStepBtn.addEventListener('click', () => addStepRow(stepsBox, null));
+        block.append(addStepBtn);
+
+        $('monComputedRows').append(block);
+    }
+
+    function syncStepKeySecretVisibility(row) {
+        const algorithm = row.querySelector('.step-row__algorithm').value;
+        row.querySelector('.step-row__key-secret').hidden = !algorithm.startsWith('HMAC_');
+    }
+
+    function addStepRow(stepsBox, step) {
+        const row = el('div', 'step-row');
+
+        const algorithmSelect = selectEl('step-row__algorithm', HASH_ALGORITHMS, step && step.algorithm);
+        algorithmSelect.addEventListener('change', () => syncStepKeySecretVisibility(row));
+        row.append(algorithmSelect);
+
+        const encodingSelect = selectEl('step-row__encoding', HASH_ENCODINGS, step && step.encoding);
+        row.append(encodingSelect);
+
+        const keySecretInput = document.createElement('input');
+        keySecretInput.type = 'text';
+        keySecretInput.placeholder = 'HMAC 金鑰的密鑰名稱';
+        keySecretInput.className = 'step-row__key-secret';
+        keySecretInput.value = (step && step.keySecret) || '';
+        row.append(keySecretInput);
+
+        const upBtn = el('button', 'btn btn--sm btn--ghost', '↑');
+        upBtn.type = 'button';
+        upBtn.title = '上移';
+        upBtn.addEventListener('click', () => {
+            const prev = row.previousElementSibling;
+            if (prev) stepsBox.insertBefore(row, prev);
+        });
+        row.append(upBtn);
+
+        const downBtn = el('button', 'btn btn--sm btn--ghost', '↓');
+        downBtn.type = 'button';
+        downBtn.title = '下移';
+        downBtn.addEventListener('click', () => {
+            const next = row.nextElementSibling;
+            if (next) stepsBox.insertBefore(next, row);
+        });
+        row.append(downBtn);
+
+        const removeBtn = el('button', 'btn btn--sm btn--ghost', '移除');
+        removeBtn.type = 'button';
+        removeBtn.addEventListener('click', () => row.remove());
+        row.append(removeBtn);
+
+        stepsBox.append(row);
+        syncStepKeySecretVisibility(row);
+    }
+
+    function collectComputedFieldRows() {
+        return Array.from($('monComputedRows').querySelectorAll('.computed-field'))
+            .map((block) => {
+                const steps = Array.from(block.querySelectorAll('.step-row')).map((row) => {
+                    const algorithm = row.querySelector('.step-row__algorithm').value;
+                    const keySecretRaw = row.querySelector('.step-row__key-secret').value.trim();
+                    return {
+                        algorithm,
+                        encoding: row.querySelector('.step-row__encoding').value,
+                        keySecret: algorithm.startsWith('HMAC_') && keySecretRaw ? keySecretRaw : null,
+                    };
+                });
+                return {
+                    name: block.querySelector('.computed-field__name').value.trim(),
+                    input: block.querySelector('.computed-field__input').value,
+                    steps,
+                };
+            })
+            .filter((f) => f.name || f.input || f.steps.length);
+    }
+
     /** 讀取表單，回傳完整設定物件。header 欄位若不是合法 JSON 會直接丟例外，呼叫端要接住。 */
     function collectMonitorForm() {
         const headersRaw = $('monHeaders').value.trim();
@@ -852,12 +1054,14 @@
             method: $('monMethod').value,
             requestBody: $('monBody').value.trim() || null,
             headers: headersRaw ? JSON.parse(headersRaw) : null,
+            secrets: collectSecretRows(),
             intervalSeconds: Number($('monInterval').value),
             enabled: $('monEnabled').checked,
             compareMode: $('monCompareMode').value,
             extractRules: collectRuleRows(),
             itemPointer: $('monItemPointer').value.trim() || null,
             itemKeyPointer: $('monItemKeyPointer').value.trim() || null,
+            computedFields: collectComputedFieldRows(),
             messageTemplate: $('monTemplate').value,
             notifyOnFailure: $('monNotifyOnFailure').checked,
             cooldownSeconds: Number($('monCooldown').value || 0),
@@ -1017,7 +1221,9 @@
         return { changed, volatile };
     }
 
-    /** /monitors/test 不吃 clientId/interval/enabled 等排程/發送欄位——試跑不建立排程、不綁定 client、更不會發送，只帶抓取＋解析＋渲染需要的部分。 */
+    /** /monitors/test 不吃 clientId/interval/enabled 等排程/發送欄位——試跑不建立排程、不綁定 client、更不會發送，只帶抓取＋解析＋渲染需要的部分。
+     *  monitorId：編輯既有監控時帶上，讓後端在計算欄位需要、但這次沒有重新輸入值的 secret 上，改用已存好的值——
+     *  不這樣做的話，每次試算都得把 secret 重新貼一次（見 doc 13 §7 對 MonitorTestRequest 的說明）。 */
     function monitorTestBody(form) {
         return {
             name: form.name || null,
@@ -1025,11 +1231,14 @@
             method: form.method,
             requestBody: form.requestBody,
             headers: form.headers,
+            secrets: form.secrets,
             compareMode: form.compareMode,
             extractRules: form.extractRules,
             itemPointer: form.itemPointer,
             itemKeyPointer: form.itemKeyPointer,
+            computedFields: form.computedFields,
             messageTemplate: form.messageTemplate,
+            monitorId: editingMonitor ? editingMonitor.id : null,
         };
     }
 
@@ -1106,6 +1315,14 @@
         box.append(el('div', 'notice notice--success', okMsg));
 
         const valueDiff = diffInfo ? diffInfo.valueDiff : null;
+
+        const computedKeys = Object.keys(result.computedValues || {});
+        if (computedKeys.length) {
+            box.append(el('p', 'fieldset-label', '計算欄位（拿去跟瀏覽器實際送出的值比對）'));
+            const list = el('ul', 'tag-set');
+            computedKeys.forEach((k) => list.append(valueChip(k, result.computedValues[k], null, k)));
+            box.append(list);
+        }
 
         const valueKeys = Object.keys(result.values || {});
         if (valueKeys.length) {
@@ -1555,6 +1772,8 @@
     $('monImportBtn').addEventListener('click', importMonitorRaw);
     $('monCopySchemaBtn').addEventListener('click', copyImportSchema);
     $('monAddRule').addEventListener('click', () => addRuleRow('', ''));
+    $('monAddSecret').addEventListener('click', () => addSecretRow('', ''));
+    $('monAddComputedField').addEventListener('click', () => addComputedFieldBlock(null));
     $('monMethod').addEventListener('change', syncMonitorMethod);
     $('monCompareMode').addEventListener('change', syncMonitorCompareMode);
     $('monitorForm').addEventListener('submit', submitMonitor);

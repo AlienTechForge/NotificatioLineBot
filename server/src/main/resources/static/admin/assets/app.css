@@ -435,6 +435,38 @@ fieldset { border: none; margin: 0; padding: 0; }
 .rule-row input { min-height: 38px; }
 @media (max-width: 640px) { .rule-row { grid-template-columns: 1fr; } }
 
+/* ---------------------------------------------------------------- 密鑰／計算欄位（doc 13） */
+
+.secret-row {
+    display: grid; grid-template-columns: 1fr 1.4fr auto; gap: var(--sp-2);
+    align-items: center; margin-bottom: var(--sp-2);
+}
+.secret-row input { min-height: 38px; }
+@media (max-width: 640px) { .secret-row { grid-template-columns: 1fr; } }
+
+.secret-row--existing {
+    display: flex; align-items: center; gap: var(--sp-2); justify-content: space-between;
+    padding: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-2);
+    border: 1px solid var(--c-border); border-radius: var(--radius-sm);
+    background: var(--c-surface-2);
+}
+
+.computed-field {
+    border: 1px solid var(--c-border); border-radius: var(--radius-sm);
+    padding: var(--sp-3); margin-bottom: var(--sp-3); background: var(--c-surface-solid);
+}
+.computed-field__head { display: grid; grid-template-columns: 1fr auto; gap: var(--sp-2); align-items: center; }
+.computed-field__name { min-height: 38px; }
+.computed-field__input { margin-top: var(--sp-2); }
+.computed-field__steps { margin-top: var(--sp-2); }
+
+.step-row {
+    display: grid; grid-template-columns: 1fr 1fr 1fr auto auto auto; gap: var(--sp-2);
+    align-items: center; margin-bottom: var(--sp-2);
+}
+.step-row select, .step-row input { min-height: 36px; }
+@media (max-width: 760px) { .step-row { grid-template-columns: 1fr 1fr; } }
+
 .test-message {
     white-space: pre-wrap; word-break: break-word; margin: 0;
     background: var(--c-surface-2); border: 1px solid var(--c-border);

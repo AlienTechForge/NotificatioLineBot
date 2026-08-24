@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -240,6 +241,130 @@ class RequestTemplateTest {
         void oneUnknownPlaceholder_wholeCallFails() {
             Map<String, String> headers = Map.of("x-bad", "{{nope}}");
             assertThatThrownBy(() -> template.renderHeaders(headers)).isInstanceOf(ApiException.class);
+        }
+    }
+
+    /**
+     * 凍結時間戳（Docs/plan/13-監控計算欄位設計.md §3，本波次必修的 bug）：一次請求只取
+     * 一次 {@code Instant}，URL、headers、body、計算欄位共用同一份 {@link RequestTemplate.Session}。
+     *
+     * <p>用一個<strong>每次呼叫都往前走的 Clock</strong> 測，不是固定 Clock——固定 Clock
+     * 就算實作有 bug（每個佔位符各自呼叫一次 {@code Instant.now(clock)}）也測不出來，
+     * 因為每次呼叫回傳的值都碰巧一樣。這正是 doc §3 描述的那個「幾百次輪詢才發生一次」
+     * 的 bug 之所以難查的原因。
+     */
+    @Nested
+    @DisplayName("凍結時間戳（Session）")
+    class FrozenSession {
+
+        /** 每次呼叫 {@code instant()} 都回傳往前推一秒的值，讓「共用同一個 Session」與「沒有共用」的差異必然可觀察。 */
+        private static final class TickingClock extends Clock {
+            private Instant next;
+
+            TickingClock(Instant start) {
+                this.next = start;
+            }
+
+            @Override
+            public ZoneId getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(ZoneId zone) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public Instant instant() {
+                Instant current = next;
+                next = next.plusSeconds(1);
+                return current;
+            }
+        }
+
+        @Test
+        @DisplayName("同一個 Session：URL、header、body 的 now.epochSeconds 全部相同，即使 Clock 會跳秒")
+        void sameSession_sameInstantAcrossUrlHeaderBody() {
+            RequestTemplate ticking = new RequestTemplate(new TickingClock(NOW));
+            RequestTemplate.Session session = ticking.newSession();
+
+            String url = ticking.render("t={{now.epochSeconds}}", session, Map.of());
+            Map<String, String> headers = ticking.renderHeaders(
+                    Map.of("x-ts", "{{now.epochSeconds}}"), session, Map.of());
+            String body = ticking.render("{\"ts\":{{now.epochSeconds}}}", session, Map.of());
+
+            assertThat(url).isEqualTo("t=" + session.instant().getEpochSecond());
+            assertThat(headers.get("x-ts")).isEqualTo(String.valueOf(session.instant().getEpochSecond()));
+            assertThat(body).isEqualTo("{\"ts\":" + session.instant().getEpochSecond() + "}");
+        }
+
+        @Test
+        @DisplayName("同一個 Session：同一個 {{uuid}} 在多次 render 呼叫間回傳同一個值")
+        void sameSession_sameUuidAcrossCalls() {
+            RequestTemplate.Session session = template.newSession();
+
+            String first = template.render("{{uuid}}", session, Map.of());
+            String second = template.render("id2={{uuid}}", session, Map.of());
+
+            assertThat(second).isEqualTo("id2=" + first);
+        }
+
+        @Test
+        @DisplayName("兩個不同 Session（未共用）：now.epochSeconds 不同——證明真的是 Session 在凍結時間，不是巧合")
+        void differentSessions_differentInstant() {
+            RequestTemplate ticking = new RequestTemplate(new TickingClock(NOW));
+            RequestTemplate.Session first = ticking.newSession();
+            RequestTemplate.Session second = ticking.newSession();
+
+            String a = ticking.render("{{now.epochSeconds}}", first, Map.of());
+            String b = ticking.render("{{now.epochSeconds}}", second, Map.of());
+
+            assertThat(a).isNotEqualTo(b);
+        }
+
+        @Test
+        @DisplayName("無參數 render(String)：每次呼叫各自建立一個新 session，只適合語法驗證，不共用時間戳")
+        void adHocRender_doesNotShareInstant() {
+            RequestTemplate ticking = new RequestTemplate(new TickingClock(NOW));
+
+            String first = ticking.render("{{now.epochSeconds}}");
+            String second = ticking.render("{{now.epochSeconds}}");
+
+            assertThat(first).isNotEqualTo(second);
+        }
+    }
+
+    @Nested
+    @DisplayName("{{computed.NAME}}")
+    class ComputedScope {
+
+        @Test
+        @DisplayName("已求值的計算欄位可以被 URL/header/body 引用")
+        void resolvesFromComputedValues() {
+            RequestTemplate.Session session = template.newSession();
+            Map<String, String> computed = Map.of("sign", "ABC123");
+
+            assertThat(template.render("sign={{computed.sign}}", session, computed)).isEqualTo("sign=ABC123");
+        }
+
+        @Test
+        @DisplayName("引用不存在的計算欄位名稱 → 拒絕")
+        void unknownComputedName_rejected() {
+            RequestTemplate.Session session = template.newSession();
+
+            assertThatThrownBy(() -> template.render("{{computed.missing}}", session, Map.of("sign", "ABC")))
+                    .isInstanceOf(ApiException.class)
+                    .satisfies(e -> assertThat(((ApiException) e).getCode()).isEqualTo(ErrorCode.VALIDATION_ERROR));
+        }
+
+        @Test
+        @DisplayName("{{secret.*}} 不是請求模板的合法 scope——secret 只能透過計算欄位間接使用")
+        void secretScope_rejected() {
+            RequestTemplate.Session session = template.newSession();
+
+            assertThatThrownBy(() -> template.render("{{secret.appsecret}}", session, Map.of()))
+                    .isInstanceOf(ApiException.class);
         }
     }
 }
