@@ -176,11 +176,17 @@ public class AdminController {
     /**
      * 試跑：body 帶完整設定（未存檔也可），抓一次、回傳抽出的值與渲染後的訊息。
      * 不發送、不寫入任何狀態。走跟排程完全相同的 {@code OutboundUrlGuard} 檢查。
+     *
+     * <p>成功時回應帶著目標 API 的原始回應內容（見 {@link AdminDto.MonitorTestResult}
+     * 類別註解），供後台畫成可展開的欄位選取樹——回應必須帶 {@code Cache-Control: no-store}，
+     * 理由跟 {@link #importMonitor} 一樣：內容機敏，不可被瀏覽器或中介的快取留存。
      */
     @PostMapping("/monitors/test")
-    public ApiResponse<AdminDto.MonitorTestResult> testMonitor(
+    public ResponseEntity<ApiResponse<AdminDto.MonitorTestResult>> testMonitor(
             @Valid @RequestBody AdminDto.MonitorTestRequest body) {
-        return ApiResponse.ok(adminService.testMonitor(body));
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(ApiResponse.ok(adminService.testMonitor(body)));
     }
 
     /** 最近 50 筆執行紀錄。 */

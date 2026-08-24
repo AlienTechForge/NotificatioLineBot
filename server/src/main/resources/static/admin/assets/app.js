@@ -904,18 +904,25 @@
 
     /** 上一次成功的試跑結果 { result, compareMode }，供「再抓一次比對」當基準；null = 還沒測試過。 */
     let lastMonitorTest = null;
-    /** 欄位「易變動」追蹤：key -> { changed, total }。key 是欄位名，NEW_ITEMS 模式下是 itemKey::name。 */
+    /** 抽取值／項目欄位的「易變動」追蹤：key -> { changed, total }。NEW_ITEMS 模式下 key 是 itemKey::name。 */
     let fieldVolatility = new Map();
+    /** body 全樹（依 JsonPointer 路徑）的「易變動」追蹤，見「再抓一次」§4.3 的樹狀延伸。 */
+    let bodyVolatility = new Map();
+    /** 目前畫面上樹狀檢視使用的 body 級別 diff，{changed:Set, volatile:Set} | null——重繪樹（例如點選設定
+     *  itemPointer 後）時要沿用，不能讓 diff 標記在重繪後憑空消失。 */
+    let lastBodyDiffInfo = null;
 
     function resetFieldVolatility() {
         fieldVolatility = new Map();
+        bodyVolatility = new Map();
+        lastBodyDiffInfo = null;
     }
 
-    function bumpVolatility(key, didChange) {
-        const v = fieldVolatility.get(key) || { changed: 0, total: 0 };
+    function bumpVolatility(map, key, didChange) {
+        const v = map.get(key) || { changed: 0, total: 0 };
         v.total += 1;
         if (didChange) v.changed += 1;
-        fieldVolatility.set(key, v);
+        map.set(key, v);
         return v;
     }
 
@@ -936,7 +943,7 @@
                 Object.keys(item.fields || {}).forEach((name) => {
                     const key = item.itemKey + '::' + name;
                     const didChange = prevFields[name] !== item.fields[name];
-                    const v = bumpVolatility(key, didChange);
+                    const v = bumpVolatility(fieldVolatility, key, didChange);
                     if (didChange) {
                         changed.add(key);
                         if (isAlwaysChanging(v)) volatile.add(key);
@@ -949,13 +956,65 @@
         const nextValues = nextResult.values || {};
         new Set([...Object.keys(prevValues), ...Object.keys(nextValues)]).forEach((name) => {
             const didChange = prevValues[name] !== nextValues[name];
-            const v = bumpVolatility(name, didChange);
+            const v = bumpVolatility(fieldVolatility, name, didChange);
             if (didChange) {
                 changed.add(name);
                 if (isAlwaysChanging(v)) volatile.add(name);
             }
         });
         return { changed, volatile, itemLevel: false };
+    }
+
+    /** 一次比對能安全攤平的路徑數上限——防禦性上限，避免病態的巨大回應把「再抓一次」的 diff 運算拖到卡頓。 */
+    const BODY_DIFF_MAX_ENTRIES = 5000;
+
+    /** 把 JSON 樹攤平成 { JsonPointer 路徑: 值 } 的 Map，遞迴深度與攤平筆數都設上限（同一個道理：見樹狀渲染的上限）。 */
+    function flattenJson(node, pointer, out, depth) {
+        if (out.size >= BODY_DIFF_MAX_ENTRIES || depth > 200) return;
+        if (node !== null && typeof node === 'object') {
+            const entries = Array.isArray(node) ? node.map((v, i) => [String(i), v]) : Object.entries(node);
+            if (!entries.length) { out.set(pointer, Array.isArray(node) ? '[]' : '{}'); return; }
+            for (const [key, value] of entries) {
+                if (out.size >= BODY_DIFF_MAX_ENTRIES) return;
+                flattenJson(value, pointer + '/' + escapePointerSegment(key), out, depth + 1);
+            }
+        } else {
+            out.set(pointer, rawLeafText(node));
+        }
+    }
+
+    /** 攤平／diff 比對用的完整值（不截斷），跟畫面顯示用的 {@link formatLeafValue} 分開——
+     *  截斷後的預覽字串拿去比對，超過截斷長度之後的差異會被漏掉，變成假的「沒有變動」。
+     *  前綴型別標籤是為了不讓字串 "42" 跟數字 42、或字串 "null" 跟 JSON null 互相撞成同一個 key。 */
+    function rawLeafText(value) {
+        if (value === null) return 'null:';
+        return (typeof value === 'string' ? 'str:' + value : 'raw:' + JSON.stringify(value));
+    }
+
+    function tryParseJson(text) {
+        if (typeof text !== 'string' || !text) return undefined;
+        try { return JSON.parse(text); } catch (e) { return undefined; }
+    }
+
+    /** body 全樹的 diff：只比對兩次都存在的路徑（新增/消失的路徑不算「變動」），回傳 null 代表至少一份不是合法 JSON。 */
+    function computeBodyDiff(prevBodyText, nextBodyText) {
+        const prevTree = tryParseJson(prevBodyText);
+        const nextTree = tryParseJson(nextBodyText);
+        if (prevTree === undefined || nextTree === undefined) return null;
+        const prevFlat = new Map(); flattenJson(prevTree, '', prevFlat, 0);
+        const nextFlat = new Map(); flattenJson(nextTree, '', nextFlat, 0);
+        const changed = new Set();
+        const volatile = new Set();
+        new Set([...prevFlat.keys(), ...nextFlat.keys()]).forEach((pointer) => {
+            if (!prevFlat.has(pointer) || !nextFlat.has(pointer)) return;
+            const didChange = prevFlat.get(pointer) !== nextFlat.get(pointer);
+            const v = bumpVolatility(bodyVolatility, pointer, didChange);
+            if (didChange) {
+                changed.add(pointer);
+                if (isAlwaysChanging(v)) volatile.add(pointer);
+            }
+        });
+        return { changed, volatile };
     }
 
     /** /monitors/test 不吃 clientId/interval/enabled 等排程/發送欄位——試跑不建立排程、不綁定 client、更不會發送，只帶抓取＋解析＋渲染需要的部分。 */
@@ -1018,7 +1077,9 @@
             const result = await call('/monitors/test', { method: 'POST', body: JSON.stringify(body) });
             let diffInfo = null;
             if (result.ok) {
-                diffInfo = computeTestDiff(lastMonitorTest.result, result, form.compareMode);
+                const valueDiff = computeTestDiff(lastMonitorTest.result, result, form.compareMode);
+                const bodyDiff = computeBodyDiff(lastMonitorTest.result.body, result.body);
+                diffInfo = { valueDiff, bodyDiff };
                 lastMonitorTest = { result, compareMode: form.compareMode };
             }
             renderMonitorTestResult(result, form.compareMode, diffInfo);
@@ -1044,11 +1105,13 @@
         const okMsg = '抓取成功' + (result.httpStatus ? `（HTTP ${result.httpStatus}）` : '') + '。';
         box.append(el('div', 'notice notice--success', okMsg));
 
+        const valueDiff = diffInfo ? diffInfo.valueDiff : null;
+
         const valueKeys = Object.keys(result.values || {});
         if (valueKeys.length) {
             box.append(el('p', 'fieldset-label', '抽取到的值'));
             const list = el('ul', 'tag-set');
-            valueKeys.forEach((k) => list.append(valueChip(k, result.values[k], diffInfo, k)));
+            valueKeys.forEach((k) => list.append(valueChip(k, result.values[k], valueDiff, k)));
             box.append(list);
         }
 
@@ -1067,7 +1130,7 @@
                 if (fieldKeys.length) {
                     const list = el('ul', 'tag-set');
                     fieldKeys.forEach((k) => list.append(
-                        valueChip(k, item.fields[k], diffInfo, item.itemKey + '::' + k)));
+                        valueChip(k, item.fields[k], valueDiff, item.itemKey + '::' + k)));
                     fieldsTd.append(list);
                 } else {
                     fieldsTd.textContent = '—';
@@ -1080,11 +1143,12 @@
             box.append(wrap);
         }
 
-        box.append(el('p', 'fieldset-label', '欄位展開（點「插入」加入上面的抽取欄位）'));
-        box.append(el('p', 'hint',
-            '只有值恰好是物件或陣列的已設定欄位能往下展開——先手動填一個大概的 pointer 測試看看，'
-            + '抓到容器後再從這裡精準挑選子欄位，插入的 pointer 一定正確（是從解析出來的 JSON 直接算出來的，不是用猜的）。'));
-        box.append(buildFieldOverview(result, compareMode));
+        box.append(el('p', 'fieldset-label', '欄位選取（點節點插入 JsonPointer）'));
+        box.append(el('p', 'hint', compareMode === 'NEW_ITEMS'
+            ? '先點一個陣列節點設定「項目陣列」；再點該陣列元素裡的欄位設定「項目鍵」。之後點其他欄位可插入成項目欄位（模板用 {{item.NAME}} 引用）。'
+            : '點任一節點把它的 JsonPointer 插入下面的抽取欄位（模板用 {{value.NAME}} 引用），名稱可再自行修改。'));
+        lastBodyDiffInfo = diffInfo ? diffInfo.bodyDiff : null;
+        box.append(fieldPickerTree(result, compareMode, lastBodyDiffInfo));
 
         box.append(el('p', 'fieldset-label', '渲染後的訊息'));
         const pre = el('pre', 'test-message');
@@ -1106,118 +1170,192 @@
         return li;
     }
 
-    // ---- 欄位展開／插入 pointer（取代手打 JsonPointer，見 doc 12 §4.2） ----
+    // ---- 欄位選取樹：從完整回應 body 建樹，點節點插入 JsonPointer（見 doc 12 §4.2） ----
     //
-    // 試跑回應刻意不含目標 API 的原始 body（AdminDto.MonitorTestResult 的類別註解：
-    // 「絕不含目標 API 的原始回應內容」），所以這裡只能在「已設定的欄位值恰好是物件/陣列」
-    // 時才能往下展開——用該欄位既有的 pointer 當基準往下拼接子路徑。這樣算出來的 pointer
-    // 保證正確：子節點是從同一段已經被後端解析出來的 JSON 反查出來的，不是用字串猜的。
-    // 完全空白（還沒有任何抽取欄位）時沒有東西可以展開，使用者要先手動打一個起點 pointer。
+    // 試跑回應現在會帶目標 API 的原始 body（見 AdminDto.MonitorTestResult 的類別註解：
+    // 這是刻意放寬的例外，只限這個不落地、帶 Cache-Control: no-store 的試跑端點），
+    // 所以樹直接從 body 整包建出來，不再需要使用者先手動填一個「種子」pointer 才能展開。
+    //
+    // 安全：body 是第三方 API 回應內容，全部走 textContent / el()，不用 innerHTML，見檔案開頭
+    // 的慣例。另外兩層防禦，避免病態回應（極深巢狀、超大陣列）把畫面卡死：
+    //   TREE_MAX_DEPTH    ── 超過這個深度不再往下展開，只顯示一列摘要
+    //   TREE_MAX_CHILDREN ── 每個節點最多畫這麼多個子項，其餘顯示「還有 N 筆未顯示」
 
-    function buildFieldOverview(result, compareMode) {
+    const TREE_MAX_DEPTH = 12;
+    const TREE_MAX_CHILDREN = 200;
+
+    /** NEW_ITEMS 模式下，把 pointer 換算成「相對於 itemPointer 指到的元素」的相對路徑；
+     *  不是該元素底下的欄位（例如是元素本身，或跟 itemPointer 無關）時回傳 null。 */
+    function relativeToItem(pointer, itemPointer) {
+        if (!itemPointer || pointer === itemPointer) return null;
+        const prefix = itemPointer + '/';
+        if (!pointer.startsWith(prefix)) return null;
+        const rest = pointer.slice(prefix.length); // 例如 "0/id"，第一段是陣列索引
+        const slashIdx = rest.indexOf('/');
+        if (slashIdx === -1) return null; // 指到元素本身，不是元素「裡面的欄位」——JsonPointer 不允許空字串子路徑
+        return '/' + rest.slice(slashIdx + 1);
+    }
+
+    /** 從 result.body 建立可展開的欄位選取樹；body 不是合法 JSON（或因截斷而不完整）時顯示提示而不是報錯。 */
+    function fieldPickerTree(result, compareMode, bodyDiff) {
         const wrap = el('div', 'json-tree');
-        const rulesByName = new Map(collectRuleRows().map((r) => [r.name, r.pointer]));
 
-        if (compareMode === 'NEW_ITEMS') {
-            (result.items || []).slice(0, 5).forEach((item) => {
-                const box = containerFieldsTree(item.fields || {}, rulesByName);
-                if (!box) return;
-                const itemWrap = el('div', 'json-tree__item');
-                itemWrap.append(el('p', 'hint', `項目 ${item.itemKey}`));
-                itemWrap.append(box);
-                wrap.append(itemWrap);
-            });
-        } else {
-            const box = containerFieldsTree(result.values || {}, rulesByName);
-            if (box) wrap.append(box);
+        if (result.bodyTruncated) {
+            wrap.append(el('div', 'notice notice--warning',
+                `回應已被截斷：原始 ${result.bodyOriginalLength} bytes，只保留前 256 KB。`
+                + '下面的樹可能不完整（尤其是尾端），也可能因此解析失敗。'));
         }
 
-        if (!wrap.childElementCount) {
-            wrap.append(el('p', 'hint', '目前沒有欄位可以展開（還沒設定抽取欄位，或抓到的值都是純量）。'));
+        const parsed = tryParseJson(result.body);
+        if (parsed === undefined) {
+            wrap.append(el('p', 'hint', result.body
+                ? '回應內容不是合法 JSON（或因為被截斷而不完整），無法建立欄位選取樹。'
+                : '這次測試沒有回應內容可以展開。'));
+            return wrap;
+        }
+
+        const ctx = {
+            compareMode,
+            itemPointer: compareMode === 'NEW_ITEMS' ? $('monItemPointer').value.trim() : '',
+            itemKeyPointer: compareMode === 'NEW_ITEMS' ? $('monItemKeyPointer').value.trim() : '',
+            bodyDiff,
+        };
+        if (parsed !== null && typeof parsed === 'object') {
+            renderTreeChildren(wrap, parsed, '', 0, ctx);
+        } else {
+            wrap.append(treeLeafRow('(root)', formatLeafValue(parsed), '', parsed, ctx));
         }
         return wrap;
     }
 
-    /** 把 valuesMap 裡「值是合法 JSON 物件/陣列」的項目各自轉成一棵可展開的樹；沒有任何一個符合時回傳 null。 */
-    function containerFieldsTree(valuesMap, rulesByName) {
-        const box = el('div');
-        let any = false;
-        Object.keys(valuesMap).forEach((name) => {
-            const parsed = tryParseJsonContainer(valuesMap[name]);
-            if (parsed === null) return;
-            any = true;
-            const basePointer = rulesByName.get(name) || '';
+    function renderTreeChildren(container, node, pointer, depth, ctx) {
+        const entries = Array.isArray(node) ? node.map((v, i) => [String(i), v]) : Object.entries(node);
+        const shown = entries.slice(0, TREE_MAX_CHILDREN);
+        shown.forEach(([key, value]) => {
+            container.append(renderTreeNode(key, pointer + '/' + escapePointerSegment(key), value, depth, ctx));
+        });
+        if (entries.length > shown.length) {
+            container.append(el('p', 'hint', `還有 ${entries.length - shown.length} 筆未顯示。`));
+        }
+    }
+
+    function renderTreeNode(key, pointer, value, depth, ctx) {
+        if (depth >= TREE_MAX_DEPTH) {
+            const label = (value !== null && typeof value === 'object') ? containerLabel(value) : formatLeafValue(value);
+            return treeLeafRow(key, `結構過深，未展開（${label}）`, pointer, value, ctx);
+        }
+        if (value !== null && typeof value === 'object') {
             const details = document.createElement('details');
             details.className = 'json-tree__node';
             const summary = document.createElement('summary');
-            summary.textContent = `${name}（${containerLabel(parsed)}）`;
+            summary.append(el('span', null, `${key}（${containerLabel(value)}）`));
+            appendPickButtons(summary, pointer, value, ctx);
             details.append(summary);
             const children = el('div', 'json-tree__children');
-            appendTreeChildren(children, parsed, '', basePointer);
+            renderTreeChildren(children, value, pointer, depth + 1, ctx);
             details.append(children);
-            box.append(details);
+            return details;
+        }
+        return treeLeafRow(key, formatLeafValue(value), pointer, value, ctx);
+    }
+
+    function treeLeafRow(key, valueText, pointer, value, ctx) {
+        const row = el('div', 'json-tree__leaf');
+        row.append(el('span', 'json-tree__key', key));
+        row.append(el('span', 'json-tree__value', valueText));
+        markBodyDiff(row, pointer, ctx);
+        appendPickButtons(row, pointer, value, ctx);
+        return row;
+    }
+
+    /** 依模式決定節點旁要放哪些「插入」按鈕。NEW_ITEMS 模式下絕不能出現一般「插入」按鈕——
+     *  該模式的抽取欄位一律是相對於項目的路徑，塞一個從根算起的絕對 pointer 進去會是錯的設定。 */
+    function appendPickButtons(container, pointer, value, ctx) {
+        if (!pointer) return; // 根節點本身不是合法的 JsonPointer 目標（RFC 6901：非根路徑不可為空字串）
+
+        if (ctx.compareMode !== 'NEW_ITEMS') {
+            container.append(pickBtn('插入', () => insertExtractRule(pointer)));
+            return;
+        }
+
+        if (Array.isArray(value)) {
+            if (pointer === ctx.itemPointer) {
+                container.append(el('span', 'tag tag--active', '項目陣列'));
+            } else {
+                container.append(pickBtn('設為項目陣列', () => setItemPointer(pointer)));
+            }
+        }
+
+        const rel = relativeToItem(pointer, ctx.itemPointer);
+        if (rel) {
+            if (rel === ctx.itemKeyPointer) {
+                container.append(el('span', 'tag tag--active', '項目鍵'));
+            } else if (!ctx.itemKeyPointer) {
+                container.append(pickBtn('設為項目鍵', () => setItemKeyPointer(rel)));
+            }
+            container.append(pickBtn('插入為項目欄位', () => insertItemExtractRule(rel, pointer)));
+        }
+    }
+
+    function markBodyDiff(row, pointer, ctx) {
+        if (!ctx.bodyDiff || !pointer || !ctx.bodyDiff.changed.has(pointer)) return;
+        const isVolatile = ctx.bodyDiff.volatile.has(pointer);
+        row.append(el('span', 'tag ' + (isVolatile ? 'tag--danger' : 'tag--warning'),
+            isVolatile ? '每次都變·不建議監控' : '有變動'));
+    }
+
+    function pickBtn(label, onClick) {
+        const btn = el('button', 'btn btn--sm btn--ghost json-tree__pick', label);
+        btn.type = 'button';
+        btn.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation(); // 別讓點擊冒泡到 <summary>，變成順便展開/收合節點
+            onClick();
         });
-        return any ? box : null;
+        return btn;
+    }
+
+    function insertExtractRule(pointer) {
+        const name = sanitizeRuleName(lastPointerSegment(pointer));
+        addRuleRow(name, pointer);
+        toast(`已插入欄位「${name}」：${pointer}`);
+    }
+
+    function insertItemExtractRule(relativePointer, absolutePointer) {
+        const name = sanitizeRuleName(lastPointerSegment(absolutePointer));
+        addRuleRow(name, relativePointer);
+        toast(`已插入項目欄位「${name}」：${relativePointer}`);
+    }
+
+    function setItemPointer(pointer) {
+        $('monItemPointer').value = pointer;
+        $('monItemKeyPointer').value = ''; // 換了陣列，舊的項目鍵不再有意義，清空要求重新選
+        toast(`已設定項目陣列：${pointer}（接著點陣列元素裡的欄位設定項目鍵）`);
+        refreshFieldPickerTree();
+    }
+
+    function setItemKeyPointer(relativePointer) {
+        $('monItemKeyPointer').value = relativePointer;
+        toast(`已設定項目鍵：${relativePointer}`);
+        refreshFieldPickerTree();
+    }
+
+    /** itemPointer／itemKeyPointer 變動會影響整棵樹的按鈕狀態，重繪只換掉樹本身，不動上面的值／訊息區塊。 */
+    function refreshFieldPickerTree() {
+        if (!lastMonitorTest) return;
+        const existing = $('monTestResult').querySelector('.json-tree');
+        if (!existing) return;
+        existing.replaceWith(fieldPickerTree(lastMonitorTest.result, lastMonitorTest.compareMode, lastBodyDiffInfo));
     }
 
     function containerLabel(node) {
         return Array.isArray(node) ? `陣列 · ${node.length} 筆` : `物件 · ${Object.keys(node).length} 個欄位`;
     }
 
-    function appendTreeChildren(container, node, pointerSuffix, basePointer) {
-        const entries = Array.isArray(node) ? node.map((v, i) => [String(i), v]) : Object.entries(node);
-        entries.forEach(([key, value]) => {
-            const childSuffix = pointerSuffix + '/' + escapePointerSegment(key);
-            if (value !== null && typeof value === 'object') {
-                const details = document.createElement('details');
-                details.className = 'json-tree__node';
-                const summary = document.createElement('summary');
-                summary.append(el('span', null, `${key}（${containerLabel(value)}）`));
-                summary.append(pointerPickBtn(basePointer, childSuffix));
-                details.append(summary);
-                const children = el('div', 'json-tree__children');
-                appendTreeChildren(children, value, childSuffix, basePointer);
-                details.append(children);
-                container.append(details);
-            } else {
-                const row = el('div', 'json-tree__leaf');
-                row.append(el('span', 'json-tree__key', key));
-                row.append(el('span', 'json-tree__value', formatLeafValue(value)));
-                row.append(pointerPickBtn(basePointer, childSuffix));
-                container.append(row);
-            }
-        });
-    }
-
-    function pointerPickBtn(basePointer, pointerSuffix) {
-        const btn = el('button', 'btn btn--sm btn--ghost json-tree__pick', '插入');
-        btn.type = 'button';
-        btn.addEventListener('click', (e) => {
-            e.preventDefault(); e.stopPropagation(); // 別讓點擊冒泡到 <summary>，變成順便展開/收合節點
-            insertPointerAsRule(basePointer + pointerSuffix, pointerSuffix);
-        });
-        return btn;
-    }
-
-    function insertPointerAsRule(fullPointer, pointerSuffix) {
-        const name = sanitizeRuleName(lastPointerSegment(pointerSuffix));
-        addRuleRow(name, fullPointer);
-        toast(`已插入欄位「${name}」：${fullPointer}`);
-    }
-
-    function tryParseJsonContainer(raw) {
-        if (typeof raw !== 'string') return null;
-        const trimmed = raw.trim();
-        if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) return null;
-        try {
-            const parsed = JSON.parse(trimmed);
-            return parsed !== null && typeof parsed === 'object' ? parsed : null;
-        } catch (e) { return null; }
-    }
-
+    /** 顯示用的截斷版本——跟攤平／diff 比對用的 {@link rawLeafText} 分開，避免長字串把畫面撐爆。 */
     function formatLeafValue(value) {
         if (value === null) return '—';
-        return typeof value === 'string' ? value : JSON.stringify(value);
+        const text = typeof value === 'string' ? value : JSON.stringify(value);
+        return text.length > 300 ? text.slice(0, 300) + '…' : text;
     }
 
     function escapePointerSegment(seg) {

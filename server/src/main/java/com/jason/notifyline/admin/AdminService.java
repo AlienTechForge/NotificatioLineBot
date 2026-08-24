@@ -537,7 +537,12 @@ public class AdminService {
     }
 
     /**
-     * 試跑：抓一次、回傳抽出的值與渲染後的訊息，<strong>不發送、不寫入任何狀態</strong>。
+     * 試跑：抓一次、回傳抽出的值、渲染後的訊息，以及（可能被截斷的）原始回應 body，
+     * <strong>不發送、不寫入任何狀態</strong>。回應 body 的部分見
+     * {@link ApiMonitorTestRunner} 與 {@link com.jason.notifyline.monitor.MonitorTestOutcome}
+     * 類別註解——這是對
+     * {@code Docs/plan/11-API監控輪詢設計.md} §10 持久化路徑規則的刻意放寬，只限這個
+     * 不落地、帶 {@code Cache-Control: no-store} 的端點。
      *
      * <p>安全關鍵：實際的 guard + fetch 邏輯全部在 {@link ApiMonitorTestRunner}
      * 裡——跟 {@code ApiMonitorRunner} 共用同一顆 {@code OutboundUrlGuard} bean，
