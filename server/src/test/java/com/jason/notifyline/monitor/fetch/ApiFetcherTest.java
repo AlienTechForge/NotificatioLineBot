@@ -261,6 +261,56 @@ class ApiFetcherTest {
         assertThat(failure.httpStatus()).isEqualTo(404);
     }
 
+    // ------------------------------------------------------------ Set-Cookie（W6）
+
+    @Test
+    @DisplayName("成功回應帶 Set-Cookie：原樣（未解析）放進 Success.setCookieHeaders")
+    void successResponse_capturesSetCookieHeaders() {
+        SERVER.enqueue(new MockResponse.Builder()
+                .code(200)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Set-Cookie", "session=abc; Path=/")
+                .addHeader("Set-Cookie", "csrf=def; Path=/")
+                .body("{}")
+                .build());
+
+        FetchResult result = defaultFetcher().fetch(getRequest("/data"));
+
+        assertThat(result).isInstanceOf(FetchResult.Success.class);
+        assertThat(((FetchResult.Success) result).setCookieHeaders())
+                .containsExactlyInAnyOrder("session=abc; Path=/", "csrf=def; Path=/");
+    }
+
+    @Test
+    @DisplayName("沒有 Set-Cookie 的回應：setCookieHeaders 是空的，不是 null")
+    void responseWithoutSetCookie_hasEmptyList() {
+        SERVER.enqueue(new MockResponse.Builder()
+                .code(200)
+                .addHeader("Content-Type", "application/json")
+                .body("{}")
+                .build());
+
+        FetchResult result = defaultFetcher().fetch(getRequest("/data"));
+
+        assertThat(((FetchResult.Success) result).setCookieHeaders()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("4xx（例如 401）回應也一併帶回 Set-Cookie——過期偵測之外，站台仍可能順便清空/刷新 cookie")
+    void clientErrorResponse_stillCapturesSetCookieHeaders() {
+        SERVER.enqueue(new MockResponse.Builder()
+                .code(401)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Set-Cookie", "csrf=refreshed; Path=/")
+                .body("{\"error\":\"unauthorized\"}")
+                .build());
+
+        FetchResult.Failure failure = asFailure(defaultFetcher().fetch(getRequest("/data")));
+
+        assertThat(failure.httpStatus()).isEqualTo(401);
+        assertThat(failure.setCookieHeaders()).containsExactly("csrf=refreshed; Path=/");
+    }
+
     // ------------------------------------------------------------ 網路層錯誤
 
     @Test

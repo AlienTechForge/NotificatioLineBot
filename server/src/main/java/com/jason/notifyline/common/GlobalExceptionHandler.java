@@ -45,9 +45,26 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiResponse<Void>> handleUnreadable(HttpMessageNotReadableException e) {
-        // e.getMessage() 會夾帶 body 片段與內部類別名，不可外洩
-        log.warn("請求 body 無法解析：{}", e.getMessage());
+        // e.getMessage() 會夾帶 body 片段與內部類別名，不可外洩——對外回應維持泛用訊息。
+        // 記錄時同樣不可原樣寫入：Jackson 在訊息尾端附上 [Source: (String)"..."] 這種
+        // 原始 payload 的回顯片段。POST /admin/api/monitors/import 這類端點的 payload
+        // 是使用者貼上的 cURL/fetch，含 cookie 與 API token，畸形的請求信封（例如漏了
+        // 一個引號）會讓那整段連同機密一起被 Jackson 塞進這個例外訊息裡，原樣記錄
+        // 等於把貼上的機密寫進伺服器日誌。safeDiagnostic() 保留 [Source: 之前 Jackson
+        // 給的診斷原因（例如 "Unexpected character..."），在那之前截斷。
+        log.warn("請求 body 無法解析：{}", safeDiagnostic(e.getMessage()));
         return build(ErrorCode.VALIDATION_ERROR, "Request body is not valid JSON.");
+    }
+
+    /** {@code [Source:} 之前的部分——Jackson 的錯誤原因，不含它自己回顯的原始 payload 片段。 */
+    private static final String JACKSON_SOURCE_MARKER = "[Source:";
+
+    private static String safeDiagnostic(String message) {
+        if (message == null) {
+            return "(no message)";
+        }
+        int sourceIndex = message.indexOf(JACKSON_SOURCE_MARKER);
+        return sourceIndex < 0 ? message : message.substring(0, sourceIndex).stripTrailing();
     }
 
     @ExceptionHandler(NoHandlerFoundException.class)

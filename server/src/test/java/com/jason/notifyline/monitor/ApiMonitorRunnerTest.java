@@ -11,6 +11,7 @@ import com.jason.notifyline.monitor.parse.ChangeDetector;
 import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
 import com.jason.notifyline.monitor.request.RequestTemplate;
+import com.jason.notifyline.monitor.session.SiteSessionService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -35,6 +36,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -60,6 +62,8 @@ class ApiMonitorRunnerTest {
     @Mock
     private ApiFetcher fetcher;
     @Mock
+    private SiteSessionService siteSessionService;
+    @Mock
     private ChangeDetector changeDetector;
     @Mock
     private MessageTemplate messageTemplate;
@@ -80,8 +84,13 @@ class ApiMonitorRunnerTest {
         // 沒有 {{ }} 佔位符，render() 是無害的原樣傳回，用真的實例比每個測試都要
         // stub render()/renderHeaders() 簡單，樣板替換本身的行為另有 RequestTemplateTest 覆蓋。
         RequestTemplate requestTemplate = new RequestTemplate(clock);
-        runner = new ApiMonitorRunner(guard, fetcher, changeDetector, messageTemplate, requestTemplate,
-                store, properties, SAME_THREAD_EXECUTOR, clock);
+        // 預設原樣傳回 header：這個類別要驗證的是編排邏輯，不是 cookie jar 本身的行為
+        // （那是 SiteSessionServiceTest 的職責）。lenient()——guard 擋下等案例根本不會
+        // 走到 attachCookies，嚴格模式下會被判定成「多餘的 stub」。
+        lenient().when(siteSessionService.attachCookies(any(), any()))
+                .thenAnswer(invocation -> invocation.getArgument(1));
+        runner = new ApiMonitorRunner(guard, fetcher, siteSessionService, changeDetector, messageTemplate,
+                requestTemplate, store, properties, SAME_THREAD_EXECUTOR, clock);
     }
 
     private static ClaimedMonitor monitor(CompareMode mode) {
@@ -314,6 +323,86 @@ class ApiMonitorRunnerTest {
 
         verify(changeDetector).detectNewItems(
                 any(), eq("/items"), eq("/id"), eq(claimed.extractRules()), eq(claimed.seenKeys()), eq(true));
+    }
+
+    // ------------------------------------------------------------ 站台登入狀態（W6）
+
+    @Test
+    @DisplayName("抓取前呼叫 attachCookies，帶上替換後的請求 host")
+    void attachesCookiesBeforeFetch_withResolvedHost() {
+        ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
+        claims(claimed);
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", "{}"));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), any(), any()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", "OK"), List.of()));
+
+        runner.runOnce();
+
+        verify(siteSessionService).attachCookies(eq("target.example"), eq(Map.of()));
+    }
+
+    @Test
+    @DisplayName("attachCookies 回傳的 header（含附加的 Cookie）原樣送進 fetch")
+    void fetchUsesHeadersReturnedByAttachCookies() {
+        ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
+        claims(claimed);
+        Map<String, String> withCookie = Map.of("cookie", "session=abc");
+        when(siteSessionService.attachCookies(eq("target.example"), any())).thenReturn(withCookie);
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", "{}"));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), any(), any()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", "OK"), List.of()));
+
+        runner.runOnce();
+
+        ArgumentCaptor<ApiFetcher.FetchRequest> captor = ArgumentCaptor.forClass(ApiFetcher.FetchRequest.class);
+        verify(fetcher).fetch(captor.capture());
+        assertThat(captor.getValue().headers()).isEqualTo(withCookie);
+    }
+
+    @Test
+    @DisplayName("回應後把 Set-Cookie 交給 mergeSetCookies，帶上請求 host")
+    void mergesSetCookiesAfterFetch() {
+        ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
+        claims(claimed);
+        when(fetcher.fetch(any())).thenReturn(
+                new FetchResult.Success(200, "application/json", "{}", List.of("session=new; Path=/")));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), any(), any()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", "OK"), List.of()));
+
+        runner.runOnce();
+
+        verify(siteSessionService).mergeSetCookies("target.example", List.of("session=new; Path=/"));
+    }
+
+    @Test
+    @DisplayName("guard 擋下時完全不呼叫 attachCookies——連 fetch 都沒發生")
+    void guardBlocked_doesNotAttachCookies() {
+        ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
+        claims(claimed);
+        doThrow(new OutboundUrlGuard.BlockedException("blocked"))
+                .when(guard).check(URI.create(claimed.url()));
+
+        runner.runOnce();
+
+        verify(siteSessionService, never()).attachCookies(any(), any());
+        verify(siteSessionService, never()).mergeSetCookies(any(), any());
+    }
+
+    @Test
+    @DisplayName("fetch 失敗（例如 401）一樣會嘗試合併 Set-Cookie，且失敗紀錄帶上 host")
+    void fetchFailure_stillMergesSetCookies_andRecordsHost() {
+        ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
+        claims(claimed);
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Failure(
+                FetchResult.Reason.HTTP_ERROR, "HTTP 401", 401, List.of("csrf=fresh")));
+
+        runner.runOnce();
+
+        verify(siteSessionService).mergeSetCookies("target.example", List.of("csrf=fresh"));
+        ArgumentCaptor<RunAttempt.Failure> captor = ArgumentCaptor.forClass(RunAttempt.Failure.class);
+        verify(store).recordFailure(eq(claimed), captor.capture());
+        assertThat(captor.getValue().host()).isEqualTo("target.example");
+        assertThat(captor.getValue().httpStatus()).isEqualTo(401);
     }
 
     private static List<ChangeResult.NewItem> newItemList(int count) {

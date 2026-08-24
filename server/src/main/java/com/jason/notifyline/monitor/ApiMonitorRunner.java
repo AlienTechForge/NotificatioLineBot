@@ -10,6 +10,7 @@ import com.jason.notifyline.monitor.parse.ChangeDetector;
 import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
 import com.jason.notifyline.monitor.request.RequestTemplate;
+import com.jason.notifyline.monitor.session.SiteSessionService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -69,6 +70,7 @@ public class ApiMonitorRunner {
 
     private final OutboundUrlGuard guard;
     private final ApiFetcher fetcher;
+    private final SiteSessionService siteSessionService;
     private final ChangeDetector changeDetector;
     private final MessageTemplate messageTemplate;
     private final RequestTemplate requestTemplate;
@@ -79,6 +81,7 @@ public class ApiMonitorRunner {
 
     public ApiMonitorRunner(OutboundUrlGuard guard,
                             ApiFetcher fetcher,
+                            SiteSessionService siteSessionService,
                             ChangeDetector changeDetector,
                             MessageTemplate messageTemplate,
                             RequestTemplate requestTemplate,
@@ -88,6 +91,7 @@ public class ApiMonitorRunner {
                             Clock clock) {
         this.guard = guard;
         this.fetcher = fetcher;
+        this.siteSessionService = siteSessionService;
         this.changeDetector = changeDetector;
         this.messageTemplate = messageTemplate;
         this.requestTemplate = requestTemplate;
@@ -165,13 +169,19 @@ public class ApiMonitorRunner {
     }
 
     /**
-     * 無交易：樣板替換 → guard 檢查 → HTTP 抓取 → 解析 → 比對 → （有變更才）組訊息。
+     * 無交易：樣板替換 → guard 檢查 → 附加 cookie jar → HTTP 抓取 → 合併回寫
+     * {@code Set-Cookie} → 解析 → 比對 → （有變更才）組訊息。
      *
      * <p>樣板替換（{@link RequestTemplate}）必須在這裡做，不能提前到
      * {@code ApiMonitorStore.claim()}——見 {@link ClaimedMonitor#url} 的說明。替換完成
      * 後的網址要<strong>重新</strong>過一次 {@link OutboundUrlGuard}：見
      * {@code Docs/plan/12-API監控易用性升級.md} §2.5，這是縱深防禦，目前的變數集合
      * 產不出 host，但這道檢查要在日後有人加新變數的那天之前就已經在這裡。
+     *
+     * <p>{@link SiteSessionService} 的兩次呼叫（附加、合併回寫）刻意夾在 guard 通過
+     * <strong>之後</strong>、fetch 前後——見 §3.3。兩者都是各自獨立的短交易，不會讓
+     * 這整段「無交易」的方法變得有交易；任何一邊的例外都只記警告、不阻斷抓取結果的
+     * 正常回報，理由見下面對應的 try/catch 註解。
      */
     private RunAttempt execute(ClaimedMonitor monitor) {
         Instant startedAt = clock.instant();
@@ -189,25 +199,48 @@ public class ApiMonitorRunner {
             // AdminService 存檔當下就被擋下（doc §2.5「拒絕存檔」），這裡是縱深防禦——
             // 萬一存檔時的驗證漏放過一筆，也不能讓例外掉進 process() 外層那個
             // 「不記錄、單純等租約到期重試」的粗糙 catch-all，而是要走跟 PARSE_ERROR
-            // 一樣完整的失敗記錄路徑，讓退避與失敗通知門檻正常生效。
+            // 一樣完整的失敗記錄路徑，讓退避與失敗通知門檻正常生效。連 URI 都還沒解析
+            // 出來，host 未知，用 4 參數版本（host=null）。
             return failure(startedAt, null, "TEMPLATE_ERROR", e.getMessage());
         } catch (IllegalArgumentException e) {
             // 替換後的字串不是合法 URI（例如佔位符替換出含空白的日期格式）。
             return failure(startedAt, null, "TEMPLATE_ERROR", "rendered URL is not a valid URI");
         }
+        String requestHost = targetUri.getHost();
 
         try {
             guard.check(targetUri);
         } catch (OutboundUrlGuard.BlockedException e) {
-            return failure(startedAt, null, "BLOCKED_URL", e.getMessage());
+            return failure(startedAt, null, "BLOCKED_URL", e.getMessage(), requestHost);
+        }
+
+        // 抓取前：依請求 host 找 jar，比對通過才附上 Cookie header。見
+        // Docs/plan/12-API監控易用性升級.md §3.3。decrypt/DB 若意外失敗，寧可當成
+        // 「這次沒有登入狀態可用」繼續往下打，也不要讓一筆壞掉的 jar 拖垮整個監控。
+        Map<String, String> headersWithCookies;
+        try {
+            headersWithCookies = siteSessionService.attachCookies(requestHost, renderedHeaders);
+        } catch (RuntimeException e) {
+            log.warn("附加 cookie jar 失敗，本輪不使用既有登入狀態：monitorId={} host={}",
+                    monitor.id(), requestHost, e);
+            headersWithCookies = renderedHeaders;
         }
 
         FetchResult fetchResult = fetcher.fetch(new ApiFetcher.FetchRequest(
-                targetUri, monitor.method(), renderedBody, renderedHeaders));
+                targetUri, monitor.method(), renderedBody, headersWithCookies));
+
+        // 回應後：不論成功或失敗都嘗試合併 Set-Cookie 回 jar（例如 401 也可能夾帶新
+        // CSRF token），理由見 FetchResult 類別註解。同樣不能讓這一步的例外蓋掉真正
+        // 的抓取結果。
+        try {
+            siteSessionService.mergeSetCookies(requestHost, setCookieHeadersOf(fetchResult));
+        } catch (RuntimeException e) {
+            log.warn("合併 Set-Cookie 回 jar 失敗：monitorId={} host={}", monitor.id(), requestHost, e);
+        }
 
         if (fetchResult instanceof FetchResult.Failure fetchFailure) {
             return failure(startedAt, fetchFailure.httpStatus(),
-                    fetchFailure.reason().name(), fetchFailure.detail());
+                    fetchFailure.reason().name(), fetchFailure.detail(), requestHost);
         }
         FetchResult.Success success = (FetchResult.Success) fetchResult;
 
@@ -220,7 +253,7 @@ public class ApiMonitorRunner {
             // api_monitor_run.error_message 會違反「不得含回應內容全文」的規則
             // （見該欄位的 migration 註解）。這裡只留分類與長度。
             return failure(startedAt, success.httpStatus(), "PARSE_ERROR",
-                    "body length=" + success.body().length());
+                    "body length=" + success.body().length(), requestHost);
         }
 
         String renderedMessage = changeResult instanceof ChangeResult.Changed changed
@@ -229,6 +262,13 @@ public class ApiMonitorRunner {
 
         return new RunAttempt.Success(
                 startedAt, durationSince(startedAt), success.httpStatus(), changeResult, renderedMessage);
+    }
+
+    private static List<String> setCookieHeadersOf(FetchResult result) {
+        return switch (result) {
+            case FetchResult.Success success -> success.setCookieHeaders();
+            case FetchResult.Failure failure -> failure.setCookieHeaders();
+        };
     }
 
     private ChangeResult detect(ClaimedMonitor monitor, String body) {
@@ -288,6 +328,11 @@ public class ApiMonitorRunner {
 
     private RunAttempt.Failure failure(Instant startedAt, Integer httpStatus, String classification, String detail) {
         return new RunAttempt.Failure(startedAt, durationSince(startedAt), classification, detail, httpStatus);
+    }
+
+    private RunAttempt.Failure failure(Instant startedAt, Integer httpStatus, String classification, String detail,
+                                       String host) {
+        return new RunAttempt.Failure(startedAt, durationSince(startedAt), classification, detail, httpStatus, host);
     }
 
     private int durationSince(Instant startedAt) {
