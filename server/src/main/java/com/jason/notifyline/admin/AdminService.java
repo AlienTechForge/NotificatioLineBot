@@ -22,6 +22,10 @@ import com.jason.notifyline.monitor.domain.ApiMonitorRun;
 import com.jason.notifyline.monitor.domain.ApiMonitorRunRepository;
 import com.jason.notifyline.monitor.domain.CompareMode;
 import com.jason.notifyline.monitor.domain.ExtractRule;
+import com.jason.notifyline.monitor.fetch.OutboundUrlGuard;
+import com.jason.notifyline.monitor.importer.ImportedRequest;
+import com.jason.notifyline.monitor.importer.RequestImporter;
+import com.jason.notifyline.monitor.request.RequestTemplate;
 import com.jason.notifyline.notification.NotificationService;
 import com.jason.notifyline.notification.api.NotificationAccepted;
 import com.jason.notifyline.notification.api.NotificationDetail;
@@ -85,6 +89,9 @@ public class AdminService {
     /** header 密文的 AAD 前綴，需跟 {@code ApiMonitorStore} 用同一個值才解得開。 */
     private static final String HEADERS_AAD_PREFIX = "monitor:";
 
+    /** 匯入端點的輸入長度上限。見 {@code Docs/plan/12-API監控易用性升級.md} §2.6。 */
+    private static final int IMPORT_MAX_BYTES = 64 * 1024;
+
     private final ClientRepository clients;
     private final ClientService clientService;
     private final LineUserRepository lineUsers;
@@ -101,6 +108,9 @@ public class AdminService {
     private final MonitorProperties monitorProperties;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final OutboundUrlGuard outboundUrlGuard;
+    private final RequestImporter requestImporter;
+    private final RequestTemplate requestTemplate;
 
     public AdminService(ClientRepository clients,
                         ClientService clientService,
@@ -117,7 +127,10 @@ public class AdminService {
                         SecretCipher secretCipher,
                         MonitorProperties monitorProperties,
                         ObjectMapper objectMapper,
-                        Clock clock) {
+                        Clock clock,
+                        OutboundUrlGuard outboundUrlGuard,
+                        RequestImporter requestImporter,
+                        RequestTemplate requestTemplate) {
         this.clients = clients;
         this.clientService = clientService;
         this.lineUsers = lineUsers;
@@ -134,6 +147,9 @@ public class AdminService {
         this.monitorProperties = monitorProperties;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.outboundUrlGuard = outboundUrlGuard;
+        this.requestImporter = requestImporter;
+        this.requestTemplate = requestTemplate;
     }
 
     // ------------------------------------------------------------ 儀表板
@@ -407,7 +423,8 @@ public class AdminService {
      * 用還是 {@code null} 的 id 當 AAD 加密出來的密文永遠解不開。
      *
      * @throws ApiException client 不存在或非 ACTIVE、interval 低於下限、
-     *                       extract rule / pointer 格式不合法（均 400）
+     *                       extract rule / pointer 格式不合法、請求模板含未知佔位符或
+     *                       畸形 {@code now.format} pattern（均 400）
      */
     @Transactional
     public AdminDto.MonitorSummary createMonitor(AdminDto.CreateMonitorRequest request) {
@@ -415,6 +432,7 @@ public class AdminService {
         int intervalSeconds = requireValidInterval(request.intervalSeconds());
         validateExtractRules(request.extractRules());
         validateItemPointers(request.compareMode(), request.itemPointer(), request.itemKeyPointer());
+        validateRequestTemplate(request.url(), request.headers(), request.requestBody());
 
         Instant now = clock.instant();
         ApiMonitor monitor;
@@ -448,7 +466,8 @@ public class AdminService {
      * 見 {@code ApiMonitor#applyUpdate} 的說明。
      *
      * @throws ApiException 監控不存在（404）；client 不存在或非 ACTIVE、interval 低於下限、
-     *                       extract rule / pointer 格式不合法（均 400）
+     *                       extract rule / pointer 格式不合法、請求模板含未知佔位符或
+     *                       畸形 {@code now.format} pattern（均 400）
      */
     @Transactional
     public AdminDto.MonitorSummary updateMonitor(Long id, AdminDto.UpdateMonitorRequest request) {
@@ -457,6 +476,7 @@ public class AdminService {
         int intervalSeconds = requireValidInterval(request.intervalSeconds());
         validateExtractRules(request.extractRules());
         validateItemPointers(request.compareMode(), request.itemPointer(), request.itemKeyPointer());
+        validateRequestTemplate(request.url(), request.headers(), request.requestBody());
 
         Instant now = clock.instant();
         try {
@@ -518,20 +538,72 @@ public class AdminService {
      * 裡——跟 {@code ApiMonitorRunner} 共用同一顆 {@code OutboundUrlGuard} bean，
      * 這裡不能也不會自己另外組一條路徑繞過去。見該類別的類別註解。
      *
-     * @throws ApiException extract rule / pointer 格式不合法，或 url 不是合法 URI（均 400）
+     * <p>試跑一樣套用 {@link RequestTemplate}——URL／header／body 裡的
+     * {@code {{ ... }}} 佔位符在送出前先替換，跟排程輪詢（{@code ApiMonitorRunner}）
+     * 是同一份替換邏輯，讓「立即測試」看到的結果跟實際排程會打出去的請求一致。
+     *
+     * @throws ApiException extract rule / pointer 格式不合法、請求模板含未知佔位符或
+     *                       畸形 {@code now.format} pattern，或替換後的 url 不是合法
+     *                       URI（均 400）
      */
     public AdminDto.MonitorTestResult testMonitor(AdminDto.MonitorTestRequest request) {
         validateExtractRules(request.extractRules());
         validateItemPointers(request.compareMode(), request.itemPointer(), request.itemKeyPointer());
-        URI uri = parseTestUrl(request.url());
+
+        URI uri = parseTestUrl(requestTemplate.render(request.url()));
+        Map<String, String> renderedHeaders = requestTemplate.renderHeaders(request.headers());
+        String renderedBody = requestTemplate.render(request.requestBody());
 
         String name = emptyToNull(request.name());
         ApiMonitorTestRunner.TestConfig config = new ApiMonitorTestRunner.TestConfig(
-                name == null ? "(測試)" : name, uri, request.method(), request.requestBody(), request.headers(),
+                name == null ? "(測試)" : name, uri, request.method(), renderedBody, renderedHeaders,
                 request.compareMode(), request.extractRules(),
                 request.itemPointer(), request.itemKeyPointer(), request.messageTemplate());
 
         return AdminDto.MonitorTestResult.from(monitorTestRunner.run(config));
+    }
+
+    // -------------------------------------------------------------- 監控：匯入（W5）
+
+    /**
+     * 匯入解析：把貼上的 cURL / {@code fetch(...)} / 自訂 JSON 解析成
+     * {@link ImportedRequest}，<strong>不存檔</strong>。見
+     * {@code Docs/plan/12-API監控易用性升級.md} §2.6。
+     *
+     * <p><strong>安全關鍵</strong>：解析出的 URL 立刻過 {@link OutboundUrlGuard}，
+     * 擋掉就丟例外、<strong>不回傳解析結果</strong>——否則這個端點就變成一個「先幫你
+     * 把 cookie/token 解出來，再告訴你打不到」的資訊外洩管道，guard 擋下時什麼都
+     * 不該回。
+     *
+     * <p><strong>絕不記錄</strong>：這個方法、{@link RequestImporter} 與它底下的三個
+     * 解析器都不寫任何 log（含 debug）——貼上的內容含 cookie 與 API token。輸入大小
+     * 上限在這裡以<strong>位元組數</strong>檢查，不是字元數：貼上內容常帶中文
+     * header 值，用字元數當上限會低估實際傳輸位元組數。
+     *
+     * @throws ApiException 輸入超過 64 KB（{@code PAYLOAD_TOO_LARGE}）；格式無法辨識、
+     *                       解析失敗，或解析出的 URL 被 guard 擋下（均
+     *                       {@code VALIDATION_ERROR}）
+     */
+    public ImportedRequest importMonitorRequest(String raw) {
+        if (raw.getBytes(StandardCharsets.UTF_8).length > IMPORT_MAX_BYTES) {
+            throw new ApiException(ErrorCode.PAYLOAD_TOO_LARGE, "Pasted content exceeds the 64 KB limit.");
+        }
+
+        ImportedRequest imported = requestImporter.importRequest(raw);
+
+        URI uri;
+        try {
+            uri = URI.create(imported.url());
+        } catch (IllegalArgumentException e) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR, "Parsed URL is not a valid URI.");
+        }
+        try {
+            outboundUrlGuard.check(uri);
+        } catch (OutboundUrlGuard.BlockedException e) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR, e.getMessage());
+        }
+
+        return imported;
     }
 
     /** 單一監控最近 50 筆執行紀錄，最新在前。 */
@@ -639,6 +711,37 @@ public class AdminService {
             return URI.create(url);
         } catch (IllegalArgumentException e) {
             throw new ApiException(ErrorCode.VALIDATION_ERROR, "url is not a valid URI.");
+        }
+    }
+
+    /**
+     * 存檔前驗證請求模板（{@code Docs/plan/12-API監控易用性升級.md} §2.5）：URL、每個
+     * header value、body 都要能通過 {@link RequestTemplate#render}——未知佔位符或
+     * 畸形 {@code now.format} pattern 在這裡就拒絕存檔，不要等到排程真的執行時才發現
+     * 「每一輪都打到錯的網址」。替換後的 URL 也要能被 {@link URI#create} 解析（例如
+     * pattern 若刻意產生空白等非法字元，會在這裡就被抓到，而不是等實際輪詢時）。
+     *
+     * <p>只丟棄渲染結果，不使用——這裡只是借用 {@code render()} 的驗證副作用，
+     * 真正的替換要等到實際送出前才做（{@code {{now...}}} 的值本來就不該在存檔當下
+     * 就固定下來）。
+     *
+     * @param headers 編輯時可能是 {@code null}（= 不變更既有 header，見
+     *                {@code AdminDto.UpdateMonitorRequest} 的說明）——這種情況下沒有
+     *                新內容需要驗證，既有 header 早在它自己存檔的當下就驗證過了
+     */
+    private void validateRequestTemplate(String url, Map<String, String> headers, String requestBody) {
+        String renderedUrl = requestTemplate.render(url);
+        try {
+            URI.create(renderedUrl);
+        } catch (IllegalArgumentException e) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR,
+                    "url is not a valid URI after applying template variables.");
+        }
+        if (headers != null && !headers.isEmpty()) {
+            requestTemplate.renderHeaders(headers);
+        }
+        if (requestBody != null) {
+            requestTemplate.render(requestBody);
         }
     }
 

@@ -9,12 +9,14 @@ import com.jason.notifyline.monitor.fetch.OutboundUrlGuard;
 import com.jason.notifyline.monitor.parse.ChangeDetector;
 import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
+import com.jason.notifyline.monitor.request.RequestTemplate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
+import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -69,6 +71,7 @@ public class ApiMonitorRunner {
     private final ApiFetcher fetcher;
     private final ChangeDetector changeDetector;
     private final MessageTemplate messageTemplate;
+    private final RequestTemplate requestTemplate;
     private final ApiMonitorStore store;
     private final MonitorProperties properties;
     private final Executor monitorTaskExecutor;
@@ -78,6 +81,7 @@ public class ApiMonitorRunner {
                             ApiFetcher fetcher,
                             ChangeDetector changeDetector,
                             MessageTemplate messageTemplate,
+                            RequestTemplate requestTemplate,
                             ApiMonitorStore store,
                             MonitorProperties properties,
                             @Qualifier("monitorTaskExecutor") Executor monitorTaskExecutor,
@@ -86,6 +90,7 @@ public class ApiMonitorRunner {
         this.fetcher = fetcher;
         this.changeDetector = changeDetector;
         this.messageTemplate = messageTemplate;
+        this.requestTemplate = requestTemplate;
         this.store = store;
         this.properties = properties;
         this.monitorTaskExecutor = monitorTaskExecutor;
@@ -159,18 +164,46 @@ public class ApiMonitorRunner {
         }
     }
 
-    /** 無交易：guard 檢查 → HTTP 抓取 → 解析 → 比對 → （有變更才）組訊息。 */
+    /**
+     * 無交易：樣板替換 → guard 檢查 → HTTP 抓取 → 解析 → 比對 → （有變更才）組訊息。
+     *
+     * <p>樣板替換（{@link RequestTemplate}）必須在這裡做，不能提前到
+     * {@code ApiMonitorStore.claim()}——見 {@link ClaimedMonitor#url} 的說明。替換完成
+     * 後的網址要<strong>重新</strong>過一次 {@link OutboundUrlGuard}：見
+     * {@code Docs/plan/12-API監控易用性升級.md} §2.5，這是縱深防禦，目前的變數集合
+     * 產不出 host，但這道檢查要在日後有人加新變數的那天之前就已經在這裡。
+     */
     private RunAttempt execute(ClaimedMonitor monitor) {
         Instant startedAt = clock.instant();
 
+        URI targetUri;
+        Map<String, String> renderedHeaders;
+        String renderedBody;
         try {
-            guard.check(monitor.uri());
+            String renderedUrl = requestTemplate.render(monitor.url());
+            targetUri = URI.create(renderedUrl);
+            renderedHeaders = requestTemplate.renderHeaders(monitor.headers());
+            renderedBody = monitor.requestBody() == null ? null : requestTemplate.render(monitor.requestBody());
+        } catch (ApiException e) {
+            // 樣板渲染失敗（未知佔位符、畸形 format pattern）。這類錯誤理論上該在
+            // AdminService 存檔當下就被擋下（doc §2.5「拒絕存檔」），這裡是縱深防禦——
+            // 萬一存檔時的驗證漏放過一筆，也不能讓例外掉進 process() 外層那個
+            // 「不記錄、單純等租約到期重試」的粗糙 catch-all，而是要走跟 PARSE_ERROR
+            // 一樣完整的失敗記錄路徑，讓退避與失敗通知門檻正常生效。
+            return failure(startedAt, null, "TEMPLATE_ERROR", e.getMessage());
+        } catch (IllegalArgumentException e) {
+            // 替換後的字串不是合法 URI（例如佔位符替換出含空白的日期格式）。
+            return failure(startedAt, null, "TEMPLATE_ERROR", "rendered URL is not a valid URI");
+        }
+
+        try {
+            guard.check(targetUri);
         } catch (OutboundUrlGuard.BlockedException e) {
             return failure(startedAt, null, "BLOCKED_URL", e.getMessage());
         }
 
         FetchResult fetchResult = fetcher.fetch(new ApiFetcher.FetchRequest(
-                monitor.uri(), monitor.method(), monitor.requestBody(), monitor.headers()));
+                targetUri, monitor.method(), renderedBody, renderedHeaders));
 
         if (fetchResult instanceof FetchResult.Failure fetchFailure) {
             return failure(startedAt, fetchFailure.httpStatus(),

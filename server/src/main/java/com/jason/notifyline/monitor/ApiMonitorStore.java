@@ -27,7 +27,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
 
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -148,7 +147,8 @@ public class ApiMonitorStore {
             claimed.add(new ClaimedMonitor(
                     monitor.getId(),
                     monitor.getName(),
-                    URI.create(monitor.getUrl()),
+                    // 原始樣板文字，刻意不在這裡呼叫 URI.create()——見 ClaimedMonitor#url 的說明。
+                    monitor.getUrl(),
                     monitor.getMethod(),
                     monitor.getRequestBody(),
                     decryptHeaders(monitor),

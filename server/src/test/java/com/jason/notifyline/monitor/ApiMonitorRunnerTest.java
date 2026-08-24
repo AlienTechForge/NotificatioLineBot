@@ -10,6 +10,7 @@ import com.jason.notifyline.monitor.fetch.OutboundUrlGuard;
 import com.jason.notifyline.monitor.parse.ChangeDetector;
 import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
+import com.jason.notifyline.monitor.request.RequestTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -75,20 +76,24 @@ class ApiMonitorRunnerTest {
                 Duration.ofSeconds(5), Duration.ofSeconds(10), 1_048_576, "", 3,
                 Period.ofDays(14), Period.ofDays(90));
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        runner = new ApiMonitorRunner(
-                guard, fetcher, changeDetector, messageTemplate, store, properties, SAME_THREAD_EXECUTOR, clock);
+        // RequestTemplate 用真的實例（不是 mock）——這裡的固定測試網址／header 完全
+        // 沒有 {{ }} 佔位符，render() 是無害的原樣傳回，用真的實例比每個測試都要
+        // stub render()/renderHeaders() 簡單，樣板替換本身的行為另有 RequestTemplateTest 覆蓋。
+        RequestTemplate requestTemplate = new RequestTemplate(clock);
+        runner = new ApiMonitorRunner(guard, fetcher, changeDetector, messageTemplate, requestTemplate,
+                store, properties, SAME_THREAD_EXECUTOR, clock);
     }
 
     private static ClaimedMonitor monitor(CompareMode mode) {
         return new ClaimedMonitor(
-                1L, "my monitor", URI.create("https://target.example/api"), "GET", null, Map.of(),
+                1L, "my monitor", "https://target.example/api", "GET", null, Map.of(),
                 mode, List.of(new ExtractRule("status", "/status")), null, null,
                 "{{value.status}}", null, Map.of(), true, Set.of());
     }
 
     private static ClaimedMonitor newItemsMonitor() {
         return new ClaimedMonitor(
-                2L, "feed monitor", URI.create("https://target.example/feed"), "GET", null, Map.of(),
+                2L, "feed monitor", "https://target.example/feed", "GET", null, Map.of(),
                 CompareMode.NEW_ITEMS, List.of(new ExtractRule("title", "/title")), "/items", "/id",
                 "{{item.title}}", null, Map.of(), true, Set.of());
     }
@@ -105,7 +110,7 @@ class ApiMonitorRunnerTest {
         ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
         claims(claimed);
         doThrow(new OutboundUrlGuard.BlockedException("Target host resolves to a disallowed network address."))
-                .when(guard).check(claimed.uri());
+                .when(guard).check(URI.create(claimed.url()));
 
         runner.runOnce();
 
@@ -113,6 +118,50 @@ class ApiMonitorRunnerTest {
         verify(store).recordFailure(eq(claimed), captor.capture());
         assertThat(captor.getValue().classification()).isEqualTo("BLOCKED_URL");
         assertThat(captor.getValue().httpStatus()).isNull();
+        verify(fetcher, never()).fetch(any());
+    }
+
+    // ------------------------------------------------------------ 樣板替換 + guard 重新檢查（W5）
+
+    @Test
+    @DisplayName("URL 含佔位符：guard 檢查的是替換後的網址，fetch 也打替換後的網址（縱深防禦）")
+    void urlWithPlaceholder_guardAndFetchSeeSubstitutedUrl() {
+        ClaimedMonitor claimed = new ClaimedMonitor(
+                3L, "templated monitor", "https://target.example/api?ts={{now.epochSeconds}}", "GET", null,
+                Map.of("x-request-id", "{{uuid}}"),
+                CompareMode.WHOLE_BODY, List.of(new ExtractRule("status", "/status")), null, null,
+                "{{value.status}}", null, Map.of(), true, Set.of());
+        claims(claimed);
+        URI expectedUri = URI.create("https://target.example/api?ts=" + NOW.getEpochSecond());
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", "{}"));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), any(), any()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", "OK"), List.of()));
+
+        runner.runOnce();
+
+        verify(guard).check(expectedUri);
+        ArgumentCaptor<ApiFetcher.FetchRequest> captor = ArgumentCaptor.forClass(ApiFetcher.FetchRequest.class);
+        verify(fetcher).fetch(captor.capture());
+        assertThat(captor.getValue().uri()).isEqualTo(expectedUri);
+        assertThat(captor.getValue().headers()).containsKey("x-request-id");
+        assertThat(captor.getValue().headers().get("x-request-id")).isNotEqualTo("{{uuid}}");
+    }
+
+    @Test
+    @DisplayName("未知佔位符：分類 TEMPLATE_ERROR，完全不呼叫 guard 或 fetcher（跟 PARSE_ERROR 一樣走完整失敗記錄路徑）")
+    void unknownPlaceholder_recordsTemplateErrorFailure() {
+        ClaimedMonitor claimed = new ClaimedMonitor(
+                4L, "bad template monitor", "https://target.example/api?x={{totally.unknown}}", "GET", null,
+                Map.of(), CompareMode.WHOLE_BODY, List.of(), null, null,
+                "{{value.status}}", null, Map.of(), true, Set.of());
+        claims(claimed);
+
+        runner.runOnce();
+
+        ArgumentCaptor<RunAttempt.Failure> captor = ArgumentCaptor.forClass(RunAttempt.Failure.class);
+        verify(store).recordFailure(eq(claimed), captor.capture());
+        assertThat(captor.getValue().classification()).isEqualTo("TEMPLATE_ERROR");
+        verify(guard, never()).check(any());
         verify(fetcher, never()).fetch(any());
     }
 
