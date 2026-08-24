@@ -442,6 +442,36 @@ fieldset { border: none; margin: 0; padding: 0; }
     font-family: var(--font-sans); font-size: 13px; line-height: 1.6;
 }
 
+/* chip 附帶「有變動／每次都變」標記時（doc 12 §4.3），讓 tag 跟文字同一行對齊 */
+.diff-chip { display: flex; align-items: center; gap: var(--sp-1); }
+
+/* ---------------------------------------------------------------- 欄位展開樹（doc 12 §4.2） */
+
+.json-tree { margin-top: var(--sp-2); }
+.json-tree__item + .json-tree__item { margin-top: var(--sp-3); }
+.json-tree__node {
+    border: 1px solid var(--c-border); border-radius: var(--radius-sm);
+    background: var(--c-surface-solid); margin-bottom: var(--sp-1);
+}
+.json-tree__node > summary {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3); cursor: pointer; font-size: 13px; font-weight: 550;
+    list-style: revert;
+}
+.json-tree__node > summary:hover { background: var(--c-surface-2); }
+.json-tree__children { padding: 0 var(--sp-3) var(--sp-2) var(--sp-4); }
+.json-tree__leaf {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+    padding: var(--sp-1) var(--sp-2); font-size: 12.5px; border-radius: var(--radius-sm);
+}
+.json-tree__leaf:hover { background: var(--c-surface-2); }
+.json-tree__key { font-family: var(--font-mono); color: var(--c-fg-muted); flex: none; }
+.json-tree__value {
+    font-family: var(--font-mono); overflow-wrap: anywhere; margin-inline-end: auto;
+    padding-inline-start: var(--sp-2);
+}
+.json-tree__pick { min-height: 26px; padding: 0 var(--sp-2); font-size: 12px; flex: none; }
+
 .user-picker {
     margin-top: var(--sp-3); border: 1px solid var(--c-border);
     border-radius: var(--radius-sm); max-height: 260px; overflow-y: auto;
@@ -505,6 +535,7 @@ dialog::backdrop { background: rgb(4 8 16 / 0.55); backdrop-filter: blur(3px); }
 .notice--error   { background: var(--c-danger-soft);  color: var(--c-danger);  border-color: color-mix(in srgb, var(--c-danger) 35%, transparent); }
 .notice--success { background: var(--c-success-soft); color: var(--c-success); border-color: color-mix(in srgb, var(--c-success) 35%, transparent); }
 .notice--info    { background: var(--c-accent-soft); color: var(--c-accent); border-color: color-mix(in srgb, var(--c-accent) 35%, transparent); }
+.notice--warning { background: var(--c-warning-soft); color: var(--c-warning); border-color: color-mix(in srgb, var(--c-warning) 35%, transparent); }
 
 .empty, .loading { padding: var(--sp-6); text-align: center; color: var(--c-fg-muted); font-size: 14px; }
 

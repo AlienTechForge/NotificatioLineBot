@@ -14,6 +14,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -48,6 +49,7 @@ public class ApiFetcher {
     private static final Logger log = LoggerFactory.getLogger(ApiFetcher.class);
 
     private static final String CONTENT_TYPE_HEADER = "Content-Type";
+    private static final String SET_COOKIE_HEADER = "set-cookie";
     private static final int READ_CHUNK_SIZE = 8192;
 
     private final MonitorProperties properties;
@@ -104,18 +106,21 @@ public class ApiFetcher {
 
     private FetchResult handleResponse(HttpResponse<InputStream> response) {
         int status = response.statusCode();
+        // 不論最終走哪個分支都先抓下來——即使是 3xx/4xx/5xx，目標站台仍可能夾帶
+        // Set-Cookie（例如 401 順便清空失效的 session），見 FetchResult 類別註解。
+        List<String> setCookieHeaders = response.headers().allValues(SET_COOKIE_HEADER);
 
         if (status >= 300 && status < 400) {
             closeQuietly(response.body());
             return failure(FetchResult.Reason.REDIRECT_NOT_ALLOWED,
-                    "server returned HTTP " + status, status);
+                    "server returned HTTP " + status, status, setCookieHeaders);
         }
 
         String contentType = response.headers().firstValue(CONTENT_TYPE_HEADER).orElse(null);
         if (!isJsonContentType(contentType)) {
             closeQuietly(response.body());
             return failure(FetchResult.Reason.NON_JSON_CONTENT_TYPE,
-                    "content type: " + abbreviate(contentType), status);
+                    "content type: " + abbreviate(contentType), status, setCookieHeaders);
         }
 
         String body;
@@ -123,16 +128,16 @@ public class ApiFetcher {
             body = readBounded(response.body(), properties.maxBodyBytes());
         } catch (BodyTooLargeException e) {
             return failure(FetchResult.Reason.BODY_TOO_LARGE,
-                    "response exceeded " + properties.maxBodyBytes() + " byte cap", status);
+                    "response exceeded " + properties.maxBodyBytes() + " byte cap", status, setCookieHeaders);
         } catch (IOException e) {
             log.debug("ApiFetcher 讀取回應失敗", e);
-            return failure(FetchResult.Reason.NETWORK_ERROR, e.getClass().getSimpleName(), status);
+            return failure(FetchResult.Reason.NETWORK_ERROR, e.getClass().getSimpleName(), status, setCookieHeaders);
         }
 
         if (status >= 400) {
-            return failure(FetchResult.Reason.HTTP_ERROR, "HTTP " + status, status);
+            return failure(FetchResult.Reason.HTTP_ERROR, "HTTP " + status, status, setCookieHeaders);
         }
-        return new FetchResult.Success(status, contentType, body);
+        return new FetchResult.Success(status, contentType, body, setCookieHeaders);
     }
 
     /**
@@ -179,6 +184,11 @@ public class ApiFetcher {
 
     private static FetchResult.Failure failure(FetchResult.Reason reason, String detail, Integer httpStatus) {
         return new FetchResult.Failure(reason, detail, httpStatus);
+    }
+
+    private static FetchResult.Failure failure(FetchResult.Reason reason, String detail, Integer httpStatus,
+                                                List<String> setCookieHeaders) {
+        return new FetchResult.Failure(reason, detail, httpStatus, setCookieHeaders);
     }
 
     private static String abbreviate(String value) {

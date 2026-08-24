@@ -44,6 +44,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * <p>重點覆蓋 W4 的三項安全需求：{@code /monitors/test} 走
  * {@code OutboundUrlGuard}、header 密文用正確的 id 當 AAD（否則解密會直接拋例外，
  * 而不是得到錯誤明文）、以及回應不外洩任何密文／IV／解密後的 header 值。
+ *
+ * <p>試跑成功時帶原始回應 body 這一塊（{@code Docs/plan/12-API監控易用性升級.md} §4.2 的
+ * 刻意放寬）需要真的打得到目標 API，這裡的 guard 是真的（上面這段安全需求就是在測它），
+ * 沒有 no-op 的空間——那一塊測試獨立放在 {@link AdminMonitorTestEndpointIT}，
+ * 用另一個 context（把 guard 換成 no-op）跑，避免污染這裡驗證 guard 真的擋下的案例。
  */
 @DisplayName("後台監控 API（整合）")
 @AutoConfigureMockMvc
