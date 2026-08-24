@@ -51,11 +51,21 @@ public sealed interface RunAttempt {
      *                       做對，{@code Store} 不會、也不能再幫忙過濾一次
      * @param httpStatus     有實際 HTTP 回應時才有值，被 {@code OutboundUrlGuard}
      *                       擋下或連線失敗時為 {@code null}
+     * @param host           實際要打的請求 host（樣板替換後）；只有連 URI 都還沒解析出來
+     *                       就失敗的情況（{@code TEMPLATE_ERROR}）才是 {@code null}。
+     *                       {@code ApiMonitorStore} 用它組「{host} 登入已過期」的通知——
+     *                       見 {@code Docs/plan/12-API監控易用性升級.md} §3.3
      */
     record Failure(Instant startedAt,
                     int durationMs,
                     String classification,
                     String detail,
-                    Integer httpStatus) implements RunAttempt {
+                    Integer httpStatus,
+                    String host) implements RunAttempt {
+
+        /** 沒有已解析 host 時的簡便建構子（例如 {@code TEMPLATE_ERROR}），也是既有測試沿用的形狀。 */
+        public Failure(Instant startedAt, int durationMs, String classification, String detail, Integer httpStatus) {
+            this(startedAt, durationMs, classification, detail, httpStatus, null);
+        }
     }
 }

@@ -204,4 +204,19 @@ public class AdminController {
                 .cacheControl(CacheControl.noStore())
                 .body(ApiResponse.ok(adminService.importMonitorRequest(body.raw())));
     }
+
+    // -------------------------------------------------------------- 站台登入狀態
+
+    /** 列出各 host 的登入狀態：cookie 名稱、數量、時間戳。絕不回傳值。 */
+    @GetMapping("/sessions")
+    public ApiResponse<List<AdminDto.SiteSessionSummary>> listSessions() {
+        return ApiResponse.ok(adminService.listSessions());
+    }
+
+    /** 清除某個 host 的登入狀態（不可回復）。 */
+    @DeleteMapping("/sessions/{host}")
+    public ApiResponse<Void> deleteSession(@PathVariable String host) {
+        adminService.deleteSession(host);
+        return ApiResponse.ok(null);
+    }
 }

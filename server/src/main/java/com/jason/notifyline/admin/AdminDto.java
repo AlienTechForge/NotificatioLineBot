@@ -10,6 +10,7 @@ import com.jason.notifyline.monitor.domain.ApiMonitor;
 import com.jason.notifyline.monitor.domain.ApiMonitorRun;
 import com.jason.notifyline.monitor.domain.CompareMode;
 import com.jason.notifyline.monitor.domain.ExtractRule;
+import com.jason.notifyline.monitor.session.SiteSession;
 import com.jason.notifyline.notification.domain.Notification;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -502,5 +503,33 @@ public final class AdminDto {
      * UTF-8 位元組長度。
      */
     public record ImportMonitorRequest(@NotBlank(message = "raw is required") String raw) {
+    }
+
+    // ============================================================ 站台登入狀態（W6）
+
+    /**
+     * 站台登入狀態（cookie jar）列表的一列。見
+     * {@code Docs/plan/12-API監控易用性升級.md} §3.4。
+     *
+     * <p><strong>刻意不含</strong> {@code jar_ciphertext}、{@code jar_iv} 或解密後的
+     * cookie 值——這個端點的整個重點就是「絕不回傳值」，只回 host、cookie
+     * 名稱、數量與時間戳，理由同類別註解。
+     */
+    public record SiteSessionSummary(
+            String host,
+            List<String> cookieNames,
+            int cookieCount,
+            Instant lastRefreshedAt,
+            Instant createdAt,
+            Instant updatedAt) {
+
+        public static SiteSessionSummary from(SiteSession session) {
+            List<String> names = session.getCookieNames() == null || session.getCookieNames().isBlank()
+                    ? List.of()
+                    : List.of(session.getCookieNames().split(","));
+            return new SiteSessionSummary(
+                    session.getHost(), names, names.size(),
+                    session.getLastRefreshedAt(), session.getCreatedAt(), session.getUpdatedAt());
+        }
     }
 }

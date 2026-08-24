@@ -26,6 +26,8 @@ import com.jason.notifyline.monitor.fetch.OutboundUrlGuard;
 import com.jason.notifyline.monitor.importer.ImportedRequest;
 import com.jason.notifyline.monitor.importer.RequestImporter;
 import com.jason.notifyline.monitor.request.RequestTemplate;
+import com.jason.notifyline.monitor.session.CookieCodec;
+import com.jason.notifyline.monitor.session.SiteSessionService;
 import com.jason.notifyline.notification.NotificationService;
 import com.jason.notifyline.notification.api.NotificationAccepted;
 import com.jason.notifyline.notification.api.NotificationDetail;
@@ -111,6 +113,7 @@ public class AdminService {
     private final OutboundUrlGuard outboundUrlGuard;
     private final RequestImporter requestImporter;
     private final RequestTemplate requestTemplate;
+    private final SiteSessionService siteSessionService;
 
     public AdminService(ClientRepository clients,
                         ClientService clientService,
@@ -130,7 +133,8 @@ public class AdminService {
                         Clock clock,
                         OutboundUrlGuard outboundUrlGuard,
                         RequestImporter requestImporter,
-                        RequestTemplate requestTemplate) {
+                        RequestTemplate requestTemplate,
+                        SiteSessionService siteSessionService) {
         this.clients = clients;
         this.clientService = clientService;
         this.lineUsers = lineUsers;
@@ -150,6 +154,7 @@ public class AdminService {
         this.outboundUrlGuard = outboundUrlGuard;
         this.requestImporter = requestImporter;
         this.requestTemplate = requestTemplate;
+        this.siteSessionService = siteSessionService;
     }
 
     // ------------------------------------------------------------ 儀表板
@@ -567,13 +572,20 @@ public class AdminService {
 
     /**
      * 匯入解析：把貼上的 cURL / {@code fetch(...)} / 自訂 JSON 解析成
-     * {@link ImportedRequest}，<strong>不存檔</strong>。見
-     * {@code Docs/plan/12-API監控易用性升級.md} §2.6。
+     * {@link ImportedRequest}，<strong>不存檔監控本身</strong>。見
+     * {@code Docs/plan/12-API監控易用性升級.md} §2.6、§3.3。
      *
      * <p><strong>安全關鍵</strong>：解析出的 URL 立刻過 {@link OutboundUrlGuard}，
      * 擋掉就丟例外、<strong>不回傳解析結果</strong>——否則這個端點就變成一個「先幫你
      * 把 cookie/token 解出來，再告訴你打不到」的資訊外洩管道，guard 擋下時什麼都
      * 不該回。
+     *
+     * <p><strong>cookie 會被抽出、寫進站台登入狀態（W6）</strong>：解析出的 header
+     * 若含 {@code cookie}（大小寫不拘，來自 cURL 的 {@code -b} 或 {@code -H}，也可能是
+     * {@code fetch(...)} 的 headers 物件），就把它寫進 {@link SiteSessionService} 對應
+     * host 的 jar，並從<strong>回傳給呼叫端</strong>的 header 裡移除——同站台多個監控
+     * 共用一份登入狀態，過期只要重貼一次全部復活，不會有 cookie 值被個別存進某一筆
+     * 監控自己的（也是加密的，但沒有「共用」語意的）header 密文裡。
      *
      * <p><strong>絕不記錄</strong>：這個方法、{@link RequestImporter} 與它底下的三個
      * 解析器都不寫任何 log（含 debug）——貼上的內容含 cookie 與 API token。輸入大小
@@ -584,6 +596,9 @@ public class AdminService {
      *                       解析失敗，或解析出的 URL 被 guard 擋下（均
      *                       {@code VALIDATION_ERROR}）
      */
+    // 刻意不加 @Transactional：guard.check() 內含 DNS 解析（外部 I/O），交易絕不可以
+    // 撐過它（ADR-0007 的教訓，見 ApiMonitorRunner 類別註解）。真正需要交易的只有
+    // SiteSessionService.importCookies 那段 DB 寫入，它自己是獨立的短交易。
     public ImportedRequest importMonitorRequest(String raw) {
         if (raw.getBytes(StandardCharsets.UTF_8).length > IMPORT_MAX_BYTES) {
             throw new ApiException(ErrorCode.PAYLOAD_TOO_LARGE, "Pasted content exceeds the 64 KB limit.");
@@ -603,7 +618,21 @@ public class AdminService {
             throw new ApiException(ErrorCode.VALIDATION_ERROR, e.getMessage());
         }
 
-        return imported;
+        return extractCookiesIntoSiteSession(imported, uri.getHost());
+    }
+
+    /**
+     * {@code cookie:} header 存在時抽出寫進 jar，並回傳一份不含它的 {@link ImportedRequest}。
+     * 沒有 cookie header 時原樣回傳。見 {@link #importMonitorRequest} 的說明。
+     */
+    private ImportedRequest extractCookiesIntoSiteSession(ImportedRequest imported, String host) {
+        var cookieHeader = CookieCodec.findHeaderValueIgnoreCase(imported.headers(), "cookie");
+        if (cookieHeader.isEmpty()) {
+            return imported;
+        }
+        siteSessionService.importCookies(host, cookieHeader.get());
+        Map<String, String> headersWithoutCookie = CookieCodec.withoutHeaderIgnoreCase(imported.headers(), "cookie");
+        return new ImportedRequest(imported.url(), imported.method(), headersWithoutCookie, imported.body());
     }
 
     /** 單一監控最近 50 筆執行紀錄，最新在前。 */
@@ -613,6 +642,29 @@ public class AdminService {
         return monitorRunRepository.findByMonitorIdOrderByStartedAtDesc(id, Limit.of(MONITOR_RUNS_LIMIT)).stream()
                 .map(AdminDto.MonitorRunSummary::from)
                 .toList();
+    }
+
+    // -------------------------------------------------------------- 站台登入狀態（W6）
+
+    /**
+     * 列出各 host 的登入狀態：cookie 名稱、數量、時間戳。<strong>絕不回傳值</strong>，
+     * 見 {@link AdminDto.SiteSessionSummary} 的說明。見
+     * {@code Docs/plan/12-API監控易用性升級.md} §3.4。
+     */
+    public List<AdminDto.SiteSessionSummary> listSessions() {
+        return siteSessionService.list().stream()
+                .map(AdminDto.SiteSessionSummary::from)
+                .toList();
+    }
+
+    /**
+     * 清除某個 host 的登入狀態（不可回復）。
+     *
+     * @throws ApiException 該 host 沒有登入狀態（404）
+     */
+    public void deleteSession(String host) {
+        siteSessionService.delete(host);
+        log.info("後台清除站台登入狀態：host={}", host);
     }
 
     // -------------------------------------------------------------- 監控：共用

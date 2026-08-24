@@ -83,6 +83,19 @@ public class ApiMonitorStore {
     private static final String RECOVERY_TEMPLATE =
             "✅ 監控「{{monitor.name}}」已恢復正常。（{{now}}）";
 
+    /**
+     * 連續 401/403 判定為登入過期（見 {@link #isSessionExpiryFailure}）時使用的訊息，
+     * 取代一般的 {@link #FAILURE_TEMPLATE}。見
+     * {@code Docs/plan/12-API監控易用性升級.md} §3.3。
+     *
+     * <p>刻意重用 {@link MessageTemplate.RenderContext#of} 的 {@code monitorName} 欄位
+     * 帶入 host 文字——該欄位本質上只是「{{monitor.name}} 要代入的一段文字」，不是
+     * 專屬監控名稱的型別，這裡借用它換來與 {@code {{now}}} 的時區/格式化邏輯共用，
+     * 不必在這個類別裡重刻一份 {@code DateTimeFormatter}。
+     */
+    private static final String SESSION_EXPIRY_TEMPLATE =
+            "🔒 「{{monitor.name}}」登入已過期，請重新貼上請求（含 Cookie）以恢復監控。（{{now}}）";
+
     /** {@code api_monitor_run.error_message} 的防禦性上限，見類別註解與 migration 的欄位註解。 */
     private static final int MAX_ERROR_MESSAGE_LENGTH = 500;
 
@@ -348,10 +361,11 @@ public class ApiMonitorStore {
 
         UUID failureNotificationId = null;
         if (monitor.isNotifyOnFailure() && monitor.shouldNotifyFailure(properties.failureNotifyThreshold())) {
+            String text = isSessionExpiryFailure(attempt)
+                    ? messageTemplate.render(SESSION_EXPIRY_TEMPLATE, MessageTemplate.RenderContext.of(attempt.host()))
+                    : messageTemplate.render(FAILURE_TEMPLATE, MessageTemplate.RenderContext.of(monitor.getName()));
             failureNotificationId = activeClient(monitor.getClientId(), monitor.getId())
                     .map(client -> {
-                        String text = messageTemplate.render(
-                                FAILURE_TEMPLATE, MessageTemplate.RenderContext.of(monitor.getName()));
                         try {
                             return submit(client, text, "monitor-failure-" + monitor.getId());
                         } catch (ApiException e) {
@@ -416,6 +430,20 @@ public class ApiMonitorStore {
         NotificationAccepted accepted = notificationService.submit(
                 principal, request, rawBody, null, requestId + "-" + UUID.randomUUID());
         return accepted.notificationId();
+    }
+
+    /**
+     * 401/403，且已知請求 host（{@link RunAttempt.Failure#host()}）——判定為「登入過期」，
+     * 而不是一般的抓取失敗。見 {@code Docs/plan/12-API監控易用性升級.md} §3.3。
+     *
+     * <p>今天只有 {@code ApiFetcher} 的 {@code HTTP_ERROR} 分類會把 401/403 帶進
+     * {@code httpStatus}（guard 擋下、逾時、樣板錯誤都是 {@code null} 或非 4xx），這裡
+     * 不額外檢查 {@code classification} 字串——用狀態碼本身判斷已經足夠精確，也不會
+     * 因為分類碼字串日後改名而跟著壞掉。
+     */
+    private static boolean isSessionExpiryFailure(RunAttempt.Failure attempt) {
+        Integer status = attempt.httpStatus();
+        return attempt.host() != null && status != null && (status == 401 || status == 403);
     }
 
     private static String blankToPlaceholder(String text) {
