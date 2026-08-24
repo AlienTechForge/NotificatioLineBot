@@ -29,7 +29,11 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(ApiException.class)
     public ResponseEntity<ApiResponse<Void>> handleApiException(ApiException e, HttpServletRequest request) {
-        log.warn("API 錯誤：code={} path={} message={}", e.getCode(), request.getRequestURI(), e.getMessage());
+        // 記錄用 e.getLogMessage()，不是 e.getMessage()：兩者絕大多數情況相同，只有
+        // ApiException 明確帶了第三個參數（記錄用的另一個版本）時才會不同——那正是
+        // 對外訊息回顯了使用者剛貼上的機密內容（例如匯入監控失敗時的 URL）的情況，
+        // 見 ApiException 的說明。
+        log.warn("API 錯誤：code={} path={} message={}", e.getCode(), request.getRequestURI(), e.getLogMessage());
         return build(e.getCode(), e.getMessage());
     }
 

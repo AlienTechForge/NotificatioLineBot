@@ -4,6 +4,8 @@ import com.jason.notifyline.common.ApiException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -161,5 +163,103 @@ class CurlParserTest {
     void headerWithoutColon_rejected() {
         assertThatThrownBy(() -> CurlParser.parse("curl 'https://example.com' -H 'not-a-header'"))
                 .isInstanceOf(ApiException.class);
+    }
+
+    // ------------------------------------------------------------ URL glob 跳脫（bug 回歸）
+
+    @Test
+    @DisplayName("bug 報告原文：--url 帶 \\[ \\] 的 Chrome 匯出，跳脫被剝掉，結果是合法 URI")
+    void bugReport_curlGlobEscapesInUrl_strippedAndValidUri() {
+        // 逐字照抄使用者回報的 URL（token 值已由使用者自己遮蔽），中間夾了 curl 專屬的
+        // URL glob 跳脫 \[ \]——這正是原本 java.net.URI 判定「不合法字元」的唯一原因。
+        String raw = "curl --url 'https://sfd.lanyuechuhai.com/Shop/Order/GetList?OrderBy=CreateTime+desc"
+                + "&PageIndex=1&PageSize=30&Expressionable=\\[%7B%22FieldName%22:%22CountryId%22,"
+                + "%22FieldValue%22:%221620%22,%22ConditionalType%22:10%7D\\]' \\\n"
+                + "  -H 'accept: application/json, text/plain, */*' \\\n"
+                + "  -H 'authorization: Bearer ----' \\\n"
+                + "  -H 'sign: ' \\\n"
+                + "  -H 'timestamp: 1787565614'";
+
+        ImportedRequest result = CurlParser.parse(raw);
+
+        String expectedUrl = "https://sfd.lanyuechuhai.com/Shop/Order/GetList?OrderBy=CreateTime+desc"
+                + "&PageIndex=1&PageSize=30&Expressionable=[%7B%22FieldName%22:%22CountryId%22,"
+                + "%22FieldValue%22:%221620%22,%22ConditionalType%22:10%7D]";
+        assertThat(result.url()).isEqualTo(expectedUrl);
+
+        // 這就是回歸的原始症狀：跳脫剝掉之前 URI.create 會直接丟
+        // "Illegal character in query"；剝掉之後必須能正常解析出 host/path/query。
+        URI uri = URI.create(result.url());
+        assertThat(uri.getHost()).isEqualTo("sfd.lanyuechuhai.com");
+        assertThat(uri.getPath()).isEqualTo("/Shop/Order/GetList");
+        assertThat(uri.getRawQuery())
+                .contains("Expressionable=[%7B%22FieldName%22:%22CountryId%22")
+                .doesNotContain("\\");
+
+        // 附帶驗證：真實貼上內容裡出現的空值 header（-H 'sign: '）也要正確解析。
+        assertThat(result.headers()).containsEntry("sign", "");
+    }
+
+    @Test
+    @DisplayName("--data-raw 裡的反斜線不套用 URL glob 跳脫規則，原樣保留（例如 JSON 裡跳脫過的正規表示式）")
+    void dataRawBody_backslashSurvivesUnchanged() {
+        // JSON 裡一個字面上的反斜線，寫成有效 JSON 需要用 \\ 跳脫；整段包在 bash 單引號
+        // 裡，兩個反斜線都照字面被 ShellTokenizer 保留，CurlParser 也不可以再去動它們——
+        // 這條規則只准套用在 URL 上，不可以波及 body。
+        ImportedRequest result = CurlParser.parse(
+                "curl 'https://example.com/api' --data-raw '{\"re\":\"\\\\d+\"}'");
+
+        assertThat(result.body()).isEqualTo("{\"re\":\"\\\\d+\"}");
+    }
+
+    // ------------------------------------------------------------ --url 旗標
+
+    @Test
+    @DisplayName("--url <value>：空白分隔的明確旗標形式")
+    void urlFlag_spaceForm() {
+        ImportedRequest result = CurlParser.parse("curl --url 'https://example.com/api'");
+
+        assertThat(result.url()).isEqualTo("https://example.com/api");
+    }
+
+    @Test
+    @DisplayName("--url=<value>：帶等號的附加形式——過去只靠「不認識旗標不消耗下個 token」"
+            + "這條規則的話，等號版本會整個被當成「不認識的旗標」，URL 就抓不到")
+    void urlFlag_equalsForm() {
+        ImportedRequest result = CurlParser.parse("curl --url='https://example.com/api'");
+
+        assertThat(result.url()).isEqualTo("https://example.com/api");
+    }
+
+    @Test
+    @DisplayName("--url 一樣套用 URL glob 跳脫剝除")
+    void urlFlag_alsoStripsGlobEscapes() {
+        ImportedRequest result = CurlParser.parse("curl --url 'https://example.com/api?f=\\[1\\]'");
+
+        assertThat(result.url()).isEqualTo("https://example.com/api?f=[1]");
+    }
+
+    // ------------------------------------------------------------ -g / --globoff
+
+    @Test
+    @DisplayName("-g / --globoff：被接受，不影響其餘解析（這正是跳脫語法原本要防的東西）")
+    void globoffFlags_acceptedWithoutBreakingParsing() {
+        ImportedRequest shortForm = CurlParser.parse("curl -g 'https://example.com/api'");
+        assertThat(shortForm.url()).isEqualTo("https://example.com/api");
+
+        ImportedRequest longForm = CurlParser.parse(
+                "curl 'https://example.com/api' --globoff -H 'a: 1'");
+        assertThat(longForm.url()).isEqualTo("https://example.com/api");
+        assertThat(longForm.headers()).containsEntry("a", "1");
+    }
+
+    // ------------------------------------------------------------ 空值 header
+
+    @Test
+    @DisplayName("-H 'sign: '：空值 header 解析成 name=sign, value=\"\"（真實貼上內容裡出現過）")
+    void emptyHeaderValue_parsesToEmptyString() {
+        ImportedRequest result = CurlParser.parse("curl 'https://example.com/api' -H 'sign: '");
+
+        assertThat(result.headers()).containsEntry("sign", "");
     }
 }
