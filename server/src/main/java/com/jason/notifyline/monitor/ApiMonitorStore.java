@@ -13,10 +13,12 @@ import com.jason.notifyline.monitor.domain.ApiMonitorRunRepository;
 import com.jason.notifyline.monitor.domain.CompareMode;
 import com.jason.notifyline.monitor.domain.ExtractRule;
 import com.jason.notifyline.monitor.domain.RunOutcome;
+import com.jason.notifyline.monitor.domain.ComputedField;
 import com.jason.notifyline.monitor.domain.SeenItem;
 import com.jason.notifyline.monitor.domain.SeenItemRepository;
 import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
+import com.jason.notifyline.monitor.secret.MonitorSecretService;
 import com.jason.notifyline.notification.NotificationService;
 import com.jason.notifyline.notification.api.NotificationAccepted;
 import com.jason.notifyline.notification.api.NotificationRequest;
@@ -107,6 +109,7 @@ public class ApiMonitorStore {
     private final ClientRepository clients;
     private final NotificationService notificationService;
     private final SecretCipher secretCipher;
+    private final MonitorSecretService monitorSecretService;
     private final MessageTemplate messageTemplate;
     private final MonitorProperties properties;
     private final ObjectMapper objectMapper;
@@ -118,6 +121,7 @@ public class ApiMonitorStore {
                            ClientRepository clients,
                            NotificationService notificationService,
                            SecretCipher secretCipher,
+                           MonitorSecretService monitorSecretService,
                            MessageTemplate messageTemplate,
                            MonitorProperties properties,
                            ObjectMapper objectMapper,
@@ -128,6 +132,7 @@ public class ApiMonitorStore {
         this.clients = clients;
         this.notificationService = notificationService;
         this.secretCipher = secretCipher;
+        this.monitorSecretService = monitorSecretService;
         this.messageTemplate = messageTemplate;
         this.properties = properties;
         this.objectMapper = objectMapper;
@@ -173,7 +178,12 @@ public class ApiMonitorStore {
                     monitor.getLastFingerprint(),
                     parseState(monitor.getLastState()),
                     firstRun,
-                    loadSeenKeys(monitor)));
+                    loadSeenKeys(monitor),
+                    // W13：解密 secret、解析計算欄位，理由同 decryptHeaders——抓取發生在
+                    // 交易之外，不能拿著密文或 entity 到處傳，claim() 這個短交易裡先把
+                    // 明文快照下來。
+                    monitorSecretService.decryptAll(monitor.getId()),
+                    parseComputedFields(monitor.getComputedFields())));
         }
         return claimed;
     }
@@ -464,6 +474,14 @@ public class ApiMonitorStore {
         }
         ExtractRule[] rules = objectMapper.readValue(json, ExtractRule[].class);
         return List.of(rules);
+    }
+
+    private List<ComputedField> parseComputedFields(String json) {
+        if (isBlank(json)) {
+            return List.of();
+        }
+        ComputedField[] fields = objectMapper.readValue(json, ComputedField[].class);
+        return List.of(fields);
     }
 
     /**

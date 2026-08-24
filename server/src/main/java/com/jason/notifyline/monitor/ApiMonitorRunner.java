@@ -2,6 +2,7 @@ package com.jason.notifyline.monitor;
 
 import com.jason.notifyline.common.ApiException;
 import com.jason.notifyline.common.LineLimits;
+import com.jason.notifyline.monitor.compute.ComputedFieldEvaluator;
 import com.jason.notifyline.monitor.domain.CompareMode;
 import com.jason.notifyline.monitor.fetch.ApiFetcher;
 import com.jason.notifyline.monitor.fetch.FetchResult;
@@ -74,6 +75,7 @@ public class ApiMonitorRunner {
     private final ChangeDetector changeDetector;
     private final MessageTemplate messageTemplate;
     private final RequestTemplate requestTemplate;
+    private final ComputedFieldEvaluator computedFieldEvaluator;
     private final ApiMonitorStore store;
     private final MonitorProperties properties;
     private final Executor monitorTaskExecutor;
@@ -85,6 +87,7 @@ public class ApiMonitorRunner {
                             ChangeDetector changeDetector,
                             MessageTemplate messageTemplate,
                             RequestTemplate requestTemplate,
+                            ComputedFieldEvaluator computedFieldEvaluator,
                             ApiMonitorStore store,
                             MonitorProperties properties,
                             @Qualifier("monitorTaskExecutor") Executor monitorTaskExecutor,
@@ -95,6 +98,7 @@ public class ApiMonitorRunner {
         this.changeDetector = changeDetector;
         this.messageTemplate = messageTemplate;
         this.requestTemplate = requestTemplate;
+        this.computedFieldEvaluator = computedFieldEvaluator;
         this.store = store;
         this.properties = properties;
         this.monitorTaskExecutor = monitorTaskExecutor;
@@ -178,29 +182,40 @@ public class ApiMonitorRunner {
      * {@code Docs/plan/12-API監控易用性升級.md} §2.5，這是縱深防禦，目前的變數集合
      * 產不出 host，但這道檢查要在日後有人加新變數的那天之前就已經在這裡。
      *
+     * <p><strong>凍結時間戳</strong>：{@link RequestTemplate.Session} 在這個方法最開始
+     * 建立一次，之後計算欄位求值、URL、headers、body 全部共用同一份——見
+     * {@code Docs/plan/13-監控計算欄位設計.md} §3。這裡直接拿它的 {@code instant()} 當
+     * 這次執行的 {@code startedAt}，不再另外呼叫一次 {@code clock.instant()}：兩者本來
+     * 就該是同一個「現在」，分開取只會製造不必要的、理論上可能跨秒的落差。
+     *
      * <p>{@link SiteSessionService} 的兩次呼叫（附加、合併回寫）刻意夾在 guard 通過
      * <strong>之後</strong>、fetch 前後——見 §3.3。兩者都是各自獨立的短交易，不會讓
      * 這整段「無交易」的方法變得有交易；任何一邊的例外都只記警告、不阻斷抓取結果的
      * 正常回報，理由見下面對應的 try/catch 註解。
      */
     private RunAttempt execute(ClaimedMonitor monitor) {
-        Instant startedAt = clock.instant();
+        RequestTemplate.Session session = requestTemplate.newSession();
+        Instant startedAt = session.instant();
 
         URI targetUri;
         Map<String, String> renderedHeaders;
         String renderedBody;
         try {
-            String renderedUrl = requestTemplate.render(monitor.url());
+            Map<String, String> computedValues =
+                    computedFieldEvaluator.evaluate(monitor.computedFields(), monitor.secrets(), session);
+            String renderedUrl = requestTemplate.render(monitor.url(), session, computedValues);
             targetUri = URI.create(renderedUrl);
-            renderedHeaders = requestTemplate.renderHeaders(monitor.headers());
-            renderedBody = monitor.requestBody() == null ? null : requestTemplate.render(monitor.requestBody());
+            renderedHeaders = requestTemplate.renderHeaders(monitor.headers(), session, computedValues);
+            renderedBody = monitor.requestBody() == null
+                    ? null : requestTemplate.render(monitor.requestBody(), session, computedValues);
         } catch (ApiException e) {
-            // 樣板渲染失敗（未知佔位符、畸形 format pattern）。這類錯誤理論上該在
-            // AdminService 存檔當下就被擋下（doc §2.5「拒絕存檔」），這裡是縱深防禦——
-            // 萬一存檔時的驗證漏放過一筆，也不能讓例外掉進 process() 外層那個
-            // 「不記錄、單純等租約到期重試」的粗糙 catch-all，而是要走跟 PARSE_ERROR
-            // 一樣完整的失敗記錄路徑，讓退避與失敗通知門檻正常生效。連 URI 都還沒解析
-            // 出來，host 未知，用 4 參數版本（host=null）。
+            // 樣板渲染或計算欄位求值失敗（未知佔位符、畸形 format pattern、計算欄位
+            // 引用不存在的 secret／欄位）。這類錯誤理論上該在 AdminService 存檔當下就
+            // 被擋下（doc 12 §2.5、doc 13 §5「拒絕存檔」），這裡是縱深防禦——萬一存檔時
+            // 的驗證漏放過一筆，也不能讓例外掉進 process() 外層那個「不記錄、單純等租約
+            // 到期重試」的粗糙 catch-all，而是要走跟 PARSE_ERROR 一樣完整的失敗記錄路徑，
+            // 讓退避與失敗通知門檻正常生效。連 URI 都還沒解析出來，host 未知，用 4 參數
+            // 版本（host=null）。
             return failure(startedAt, null, "TEMPLATE_ERROR", e.getMessage());
         } catch (IllegalArgumentException e) {
             // 替換後的字串不是合法 URI（例如佔位符替換出含空白的日期格式）。

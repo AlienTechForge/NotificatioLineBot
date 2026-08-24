@@ -16,16 +16,20 @@ import com.jason.notifyline.lineuser.LineUserService;
 import com.jason.notifyline.lineuser.LineUserStatus;
 import com.jason.notifyline.monitor.ApiMonitorTestRunner;
 import com.jason.notifyline.monitor.MonitorProperties;
+import com.jason.notifyline.monitor.compute.ComputedFieldEvaluator;
+import com.jason.notifyline.monitor.compute.ComputedFieldValidator;
 import com.jason.notifyline.monitor.domain.ApiMonitor;
 import com.jason.notifyline.monitor.domain.ApiMonitorRepository;
 import com.jason.notifyline.monitor.domain.ApiMonitorRun;
 import com.jason.notifyline.monitor.domain.ApiMonitorRunRepository;
 import com.jason.notifyline.monitor.domain.CompareMode;
+import com.jason.notifyline.monitor.domain.ComputedField;
 import com.jason.notifyline.monitor.domain.ExtractRule;
 import com.jason.notifyline.monitor.fetch.OutboundUrlGuard;
 import com.jason.notifyline.monitor.importer.ImportedRequest;
 import com.jason.notifyline.monitor.importer.RequestImporter;
 import com.jason.notifyline.monitor.request.RequestTemplate;
+import com.jason.notifyline.monitor.secret.MonitorSecretService;
 import com.jason.notifyline.monitor.session.CookieCodec;
 import com.jason.notifyline.monitor.session.SiteSessionService;
 import com.jason.notifyline.notification.NotificationService;
@@ -51,8 +55,11 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -89,6 +96,9 @@ public class AdminService {
     /** {@code extract_rules[].name}，模板用 {@code {{value.NAME}}} 引用，規則見 migration 欄位註解。 */
     private static final Pattern EXTRACT_RULE_NAME = Pattern.compile("[A-Za-z0-9_]{1,32}");
 
+    /** {@code monitor_secret.name}，規則同上，見 {@code monitor_secret_name_chk}。 */
+    private static final Pattern SECRET_NAME = Pattern.compile("[A-Za-z0-9_]{1,32}");
+
     /** header 密文的 AAD 前綴，需跟 {@code ApiMonitorStore} 用同一個值才解得開。 */
     private static final String HEADERS_AAD_PREFIX = "monitor:";
 
@@ -118,6 +128,9 @@ public class AdminService {
     private final RequestImporter requestImporter;
     private final RequestTemplate requestTemplate;
     private final SiteSessionService siteSessionService;
+    private final MonitorSecretService monitorSecretService;
+    private final ComputedFieldEvaluator computedFieldEvaluator;
+    private final ComputedFieldValidator computedFieldValidator;
 
     public AdminService(ClientRepository clients,
                         ClientService clientService,
@@ -138,7 +151,10 @@ public class AdminService {
                         OutboundUrlGuard outboundUrlGuard,
                         RequestImporter requestImporter,
                         RequestTemplate requestTemplate,
-                        SiteSessionService siteSessionService) {
+                        SiteSessionService siteSessionService,
+                        MonitorSecretService monitorSecretService,
+                        ComputedFieldEvaluator computedFieldEvaluator,
+                        ComputedFieldValidator computedFieldValidator) {
         this.clients = clients;
         this.clientService = clientService;
         this.lineUsers = lineUsers;
@@ -159,6 +175,9 @@ public class AdminService {
         this.requestImporter = requestImporter;
         this.requestTemplate = requestTemplate;
         this.siteSessionService = siteSessionService;
+        this.monitorSecretService = monitorSecretService;
+        this.computedFieldEvaluator = computedFieldEvaluator;
+        this.computedFieldValidator = computedFieldValidator;
     }
 
     // ------------------------------------------------------------ 儀表板
@@ -441,7 +460,15 @@ public class AdminService {
         int intervalSeconds = requireValidInterval(request.intervalSeconds());
         validateExtractRules(request.extractRules());
         validateItemPointers(request.compareMode(), request.itemPointer(), request.itemKeyPointer());
-        validateRequestTemplate(request.url(), request.headers(), request.requestBody());
+
+        // 建立當下沒有「既有 secret」，已知名稱就是這次請求裡的非空白項目——見
+        // Docs/plan/13-監控計算欄位設計.md §7。
+        Map<String, String> newSecrets = nonBlankEntries(request.secrets());
+        validateSecretNames(newSecrets.keySet());
+        Set<String> knownSecretNames = newSecrets.keySet();
+        computedFieldValidator.validate(request.computedFields(), knownSecretNames);
+        validateRequestTemplate(request.url(), request.headers(), request.requestBody(),
+                computedFieldNames(request.computedFields()));
 
         Instant now = clock.instant();
         ApiMonitor monitor;
@@ -454,17 +481,21 @@ public class AdminService {
                     request.itemPointer(), request.itemKeyPointer(), request.messageTemplate(),
                     request.notifyOnFailure() == null || request.notifyOnFailure(),
                     request.cooldownSeconds() == null ? 0 : request.cooldownSeconds(),
-                    request.maxNotificationsPerDay(), now);
+                    request.maxNotificationsPerDay(), writeComputedFieldsJson(request.computedFields()), now);
         } catch (IllegalArgumentException e) {
             throw new ApiException(ErrorCode.VALIDATION_ERROR, e.getMessage());
         }
 
-        monitor = monitors.save(monitor); // 第一次寫入：拿到 id，此時尚未帶 header
+        monitor = monitors.save(monitor); // 第一次寫入：拿到 id，此時尚未帶 header／secret
 
         if (request.headers() != null && !request.headers().isEmpty()) {
             applyEncryptedHeaders(monitor, request.headers(), now);
             monitor = monitors.save(monitor); // 第二次寫入：用剛拿到的 id 當 AAD 加密後回寫
         }
+        // secret 是獨立的表，不是這個 entity 的欄位，不需要「第二次寫入」monitor 本身——
+        // 只要 id 已經存在（上面已經 save 過一次）就能直接插入，理由見
+        // MonitorSecretService 類別註解「AAD 陷阱」。
+        monitorSecretService.upsert(monitor.getId(), newSecrets);
 
         log.info("後台建立監控：id={} name={} clientId={}", monitor.getId(), monitor.getName(), client.getClientId());
         return toMonitorSummary(monitor, client);
@@ -485,7 +516,16 @@ public class AdminService {
         int intervalSeconds = requireValidInterval(request.intervalSeconds());
         validateExtractRules(request.extractRules());
         validateItemPointers(request.compareMode(), request.itemPointer(), request.itemKeyPointer());
-        validateRequestTemplate(request.url(), request.headers(), request.requestBody());
+
+        // 已知的 secret 名稱 = 這個監控既有的 ∪ 這次請求裡非空白覆寫／新增的——見
+        // Docs/plan/13-監控計算欄位設計.md §7、AdminDto.UpdateMonitorRequest 的說明。
+        Map<String, String> secretUpdates = nonBlankEntries(request.secrets());
+        validateSecretNames(secretUpdates.keySet());
+        Set<String> knownSecretNames = new LinkedHashSet<>(monitorSecretService.listNames(id));
+        knownSecretNames.addAll(secretUpdates.keySet());
+        computedFieldValidator.validate(request.computedFields(), knownSecretNames);
+        validateRequestTemplate(request.url(), request.headers(), request.requestBody(),
+                computedFieldNames(request.computedFields()));
 
         Instant now = clock.instant();
         try {
@@ -496,7 +536,7 @@ public class AdminService {
                     request.itemPointer(), request.itemKeyPointer(), request.messageTemplate(),
                     request.notifyOnFailure() == null || request.notifyOnFailure(),
                     request.cooldownSeconds() == null ? 0 : request.cooldownSeconds(),
-                    request.maxNotificationsPerDay(), now);
+                    request.maxNotificationsPerDay(), writeComputedFieldsJson(request.computedFields()), now);
         } catch (IllegalArgumentException e) {
             throw new ApiException(ErrorCode.VALIDATION_ERROR, e.getMessage());
         }
@@ -508,8 +548,24 @@ public class AdminService {
         }
 
         monitor = monitors.save(monitor);
+        // secret 逐筆「留空 = 不變更」（同 header 的既有慣例），已在 nonBlankEntries 過濾過。
+        monitorSecretService.upsert(id, secretUpdates);
+
         log.info("後台更新監控：id={} name={}", monitor.getId(), monitor.getName());
         return toMonitorSummary(monitor, client);
+    }
+
+    /**
+     * 刪除單一監控 secret（不可回復）。走獨立端點，不透過
+     * {@link #updateMonitor}——見 {@code AdminDto.UpdateMonitorRequest#secrets} 的說明。
+     *
+     * @throws ApiException 監控不存在（404，{@link #requireMonitor}），或該監控沒有這個
+     *                       名稱的 secret（404，{@link MonitorSecretService#delete}）
+     */
+    @Transactional
+    public void deleteMonitorSecret(Long monitorId, String name) {
+        requireMonitor(monitorId);
+        monitorSecretService.delete(monitorId, name);
     }
 
     /**
@@ -556,25 +612,59 @@ public class AdminService {
      * {@code {{ ... }}} 佔位符在送出前先替換，跟排程輪詢（{@code ApiMonitorRunner}）
      * 是同一份替換邏輯，讓「立即測試」看到的結果跟實際排程會打出去的請求一致。
      *
-     * @throws ApiException extract rule / pointer 格式不合法、請求模板含未知佔位符或
-     *                       畸形 {@code now.format} pattern，或替換後的 url 不是合法
-     *                       URI（均 400）
+     * <p><strong>計算欄位（W13）</strong>：{@code request.computedFields()} 用
+     * {@link ComputedFieldEvaluator} 求一次值，跟 URL／header／body 共用同一個
+     * {@link RequestTemplate.Session}（凍結時間戳，見 {@code Docs/plan/13-監控計算欄位設計.md}
+     * §3），求出的值一併放進 {@link AdminDto.MonitorTestResult#computedValues()} 給試算面板
+     * 顯示——使用者需要拿它跟瀏覽器實際送出的值比對，但<strong>絕不回傳算這個值用的
+     * secret 本身</strong>。secret 明文的來源見 {@link #resolveTestSecrets}。
+     *
+     * @throws ApiException extract rule / pointer 格式不合法、計算欄位格式不合法或含
+     *                       前向／自我引用、請求模板含未知佔位符或畸形 {@code now.format}
+     *                       pattern，或替換後的 url 不是合法 URI（均 400）
      */
     public AdminDto.MonitorTestResult testMonitor(AdminDto.MonitorTestRequest request) {
         validateExtractRules(request.extractRules());
         validateItemPointers(request.compareMode(), request.itemPointer(), request.itemKeyPointer());
 
-        URI uri = parseTestUrl(requestTemplate.render(request.url()));
-        Map<String, String> renderedHeaders = requestTemplate.renderHeaders(request.headers());
-        String renderedBody = requestTemplate.render(request.requestBody());
+        Map<String, String> secretValues = resolveTestSecrets(request.monitorId(), request.secrets());
+        List<ComputedField> computedFields = request.computedFields() == null ? List.of() : request.computedFields();
+        computedFieldValidator.validate(computedFields, secretValues.keySet());
+
+        RequestTemplate.Session session = requestTemplate.newSession();
+        Map<String, String> computedValues = computedFieldEvaluator.evaluate(computedFields, secretValues, session);
+
+        URI uri = parseTestUrl(requestTemplate.render(request.url(), session, computedValues));
+        Map<String, String> renderedHeaders = requestTemplate.renderHeaders(request.headers(), session, computedValues);
+        String renderedBody = requestTemplate.render(request.requestBody(), session, computedValues);
 
         String name = emptyToNull(request.name());
         ApiMonitorTestRunner.TestConfig config = new ApiMonitorTestRunner.TestConfig(
                 name == null ? "(測試)" : name, uri, request.method(), renderedBody, renderedHeaders,
                 request.compareMode(), request.extractRules(),
-                request.itemPointer(), request.itemKeyPointer(), request.messageTemplate());
+                request.itemPointer(), request.itemKeyPointer(), request.messageTemplate(), computedValues);
 
         return AdminDto.MonitorTestResult.from(monitorTestRunner.run(config));
+    }
+
+    /**
+     * 試算用的 secret 明文：{@code monitorId} 給的既有值（若有）先墊底，
+     * {@code overrides} 裡的非空白值覆蓋。見 {@link AdminDto.MonitorTestRequest#secrets()}
+     * 的說明——這樣使用者編輯既有監控時不必每次都把 secret 重新貼一次。
+     *
+     * <p>回傳值只在這次請求的處理過程中存在，不會被回傳、記錄或寫入任何地方。
+     */
+    private Map<String, String> resolveTestSecrets(Long monitorId, Map<String, String> overrides) {
+        Map<String, String> merged = new LinkedHashMap<>(
+                monitorId == null ? Map.of() : monitorSecretService.decryptAll(monitorId));
+        if (overrides != null) {
+            overrides.forEach((name, value) -> {
+                if (value != null && !value.isBlank()) {
+                    merged.put(name, value);
+                }
+            });
+        }
+        return merged;
     }
 
     // -------------------------------------------------------------- 監控：匯入（W5）
@@ -725,7 +815,9 @@ public class AdminService {
                 monitor,
                 client == null ? null : client.getClientId(),
                 client == null ? "(unknown)" : client.getName(),
-                parseExtractRules(monitor.getExtractRules()));
+                parseExtractRules(monitor.getExtractRules()),
+                monitorSecretService.listNames(monitor.getId()),
+                parseComputedFields(monitor.getComputedFields()));
     }
 
     private List<ExtractRule> parseExtractRules(String json) {
@@ -737,6 +829,60 @@ public class AdminService {
 
     private String writeExtractRulesJson(List<ExtractRule> rules) {
         return objectMapper.writeValueAsString(rules == null ? List.of() : rules);
+    }
+
+    private List<ComputedField> parseComputedFields(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        return List.of(objectMapper.readValue(json, ComputedField[].class));
+    }
+
+    private String writeComputedFieldsJson(List<ComputedField> fields) {
+        return objectMapper.writeValueAsString(fields == null ? List.of() : fields);
+    }
+
+    /** {@code computed_fields[].name} 的集合，供 {@link #validateRequestTemplate} 驗證 {{computed.NAME}} 引用用。 */
+    private static Set<String> computedFieldNames(List<ComputedField> fields) {
+        if (fields == null || fields.isEmpty()) {
+            return Set.of();
+        }
+        Set<String> names = new LinkedHashSet<>();
+        for (ComputedField field : fields) {
+            names.add(field.name());
+        }
+        return names;
+    }
+
+    /**
+     * 過濾掉空白值的項目——「留空 = 不變更」（建立時則是「留空 = 不建立」）的共用實作，
+     * 見 {@code Docs/plan/13-監控計算欄位設計.md} §7。
+     */
+    private static Map<String, String> nonBlankEntries(Map<String, String> values) {
+        if (values == null || values.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> result = new LinkedHashMap<>();
+        values.forEach((name, value) -> {
+            if (value != null && !value.isBlank()) {
+                result.put(name, value);
+            }
+        });
+        return result;
+    }
+
+    /**
+     * secret 名稱格式驗證，規則同 {@code monitor_secret_name_chk}。
+     *
+     * @throws ApiException 名稱不合法（400）
+     */
+    private void validateSecretNames(Set<String> names) {
+        for (String name : names) {
+            if (!SECRET_NAME.matcher(name).matches()) {
+                throw new ApiException(ErrorCode.VALIDATION_ERROR,
+                        "secret name must match [A-Za-z0-9_]{1,32}: " + name);
+            }
+        }
     }
 
     /**
@@ -823,12 +969,24 @@ public class AdminService {
      * 真正的替換要等到實際送出前才做（{@code {{now...}}} 的值本來就不該在存檔當下
      * 就固定下來）。
      *
-     * @param headers 編輯時可能是 {@code null}（= 不變更既有 header，見
-     *                {@code AdminDto.UpdateMonitorRequest} 的說明）——這種情況下沒有
-     *                新內容需要驗證，既有 header 早在它自己存檔的當下就驗證過了
+     * @param headers          編輯時可能是 {@code null}（= 不變更既有 header，見
+     *                         {@code AdminDto.UpdateMonitorRequest} 的說明）——這種情況下
+     *                         沒有新內容需要驗證，既有 header 早在它自己存檔的當下就驗證過了
+     * @param computedFieldNames 這次請求要存的計算欄位名稱集合（{@link #computedFieldNames}）——
+     *                         URL／header／body 可能引用 {@code {{computed.NAME}}}，這裡用一份
+     *                         假的（空字串）值 map 讓 {@link RequestTemplate#render} 能通過
+     *                         語法檢查，只驗證「引用的名稱存在」，不在乎算出來的值本身
+     *                         （那要等真正送出請求時才會有）
      */
-    private void validateRequestTemplate(String url, Map<String, String> headers, String requestBody) {
-        String renderedUrl = requestTemplate.render(url);
+    private void validateRequestTemplate(String url, Map<String, String> headers, String requestBody,
+                                         Set<String> computedFieldNames) {
+        Map<String, String> dummyComputedValues = new LinkedHashMap<>();
+        for (String name : computedFieldNames) {
+            dummyComputedValues.put(name, "");
+        }
+        RequestTemplate.Session dummySession = requestTemplate.newSession();
+
+        String renderedUrl = requestTemplate.render(url, dummySession, dummyComputedValues);
         try {
             URI.create(renderedUrl);
         } catch (IllegalArgumentException e) {
@@ -836,10 +994,10 @@ public class AdminService {
                     "url is not a valid URI after applying template variables.");
         }
         if (headers != null && !headers.isEmpty()) {
-            requestTemplate.renderHeaders(headers);
+            requestTemplate.renderHeaders(headers, dummySession, dummyComputedValues);
         }
         if (requestBody != null) {
-            requestTemplate.render(requestBody);
+            requestTemplate.render(requestBody, dummySession, dummyComputedValues);
         }
     }
 

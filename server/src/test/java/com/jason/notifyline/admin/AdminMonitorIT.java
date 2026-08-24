@@ -7,8 +7,13 @@ import com.jason.notifyline.monitor.domain.ApiMonitor;
 import com.jason.notifyline.monitor.domain.ApiMonitorRepository;
 import com.jason.notifyline.monitor.domain.ApiMonitorRunRepository;
 import com.jason.notifyline.monitor.domain.CompareMode;
+import com.jason.notifyline.monitor.domain.ComputedField;
+import com.jason.notifyline.monitor.domain.ComputedStep;
 import com.jason.notifyline.monitor.domain.ExtractRule;
+import com.jason.notifyline.monitor.domain.HashAlgorithm;
+import com.jason.notifyline.monitor.domain.HashEncoding;
 import com.jason.notifyline.monitor.domain.SeenItemRepository;
+import com.jason.notifyline.monitor.secret.MonitorSecretRepository;
 import com.jason.notifyline.notification.domain.NotificationDeliveryRepository;
 import com.jason.notifyline.notification.domain.NotificationRepository;
 import com.jason.notifyline.support.PostgresIntegrationTest;
@@ -86,6 +91,8 @@ class AdminMonitorIT extends PostgresIntegrationTest {
     private SecretCipher secretCipher;
     @Autowired
     private ObjectMapper objectMapper;
+    @Autowired
+    private MonitorSecretRepository monitorSecrets;
 
     private String clientId;
 
@@ -449,5 +456,188 @@ class AdminMonitorIT extends PostgresIntegrationTest {
                         .content(objectMapper.writeValueAsString(req)))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"));
+    }
+
+    // ================================================================ W13：secret／計算欄位
+
+    private static ComputedField signField() {
+        return new ComputedField("sign", "{{secret.appsecret}}{{now.epochSeconds}}{{secret.deviceid}}",
+                List.of(new ComputedStep(HashAlgorithm.MD5, HashEncoding.HEX_UPPER, null),
+                        new ComputedStep(HashAlgorithm.MD5, HashEncoding.HEX_UPPER, null)));
+    }
+
+    @Test
+    @DisplayName("建立：secret 用正確的 AAD（monitor_secret:{id}:{name}）加密，能解回原始明文")
+    void create_withSecrets_encryptsWithCorrectAad() throws Exception {
+        AdminDto.CreateMonitorRequest req = new AdminDto.CreateMonitorRequest(
+                "monitor A", clientId, "https://target.example/api", "GET", null, null,
+                Map.of("appsecret", "YWHZ@&mxZge1A@", "deviceid", "2b34aabc-6d14-490e-b76a-254097095055"),
+                60, true, CompareMode.WHOLE_BODY, List.of(), null, null, List.of(signField()),
+                "{{value.x}}", true, 0, null);
+
+        String body = mockMvc.perform(post("/admin/api/monitors")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.secretNames[0]").value("appsecret"))
+                .andExpect(jsonPath("$.data.secretNames[1]").value("deviceid"))
+                .andExpect(jsonPath("$.data.computedFields[0].name").value("sign"))
+                .andReturn().getResponse().getContentAsString();
+        Long id = idOf(body);
+
+        var row = monitorSecrets.findByMonitorId(id).stream()
+                .filter(s -> s.getName().equals("appsecret")).findFirst().orElseThrow();
+        String plaintext = secretCipher.decrypt(row.getCiphertext(), row.getIv(), row.getKeyVersion(),
+                "monitor_secret:" + id + ":appsecret");
+        assertThat(plaintext).isEqualTo("YWHZ@&mxZge1A@");
+    }
+
+    @Test
+    @DisplayName("secret 值絕不出現在任何回應（列表、建立回應）")
+    void responsesNeverLeakSecretValues() throws Exception {
+        AdminDto.CreateMonitorRequest req = new AdminDto.CreateMonitorRequest(
+                "monitor A", clientId, "https://target.example/api", "GET", null, null,
+                Map.of("appsecret", "super-secret-leak-check-value"),
+                60, true, CompareMode.WHOLE_BODY, List.of(), null, null, List.of(),
+                "{{value.x}}", true, 0, null);
+
+        String createBody = mockMvc.perform(post("/admin/api/monitors")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(createBody).doesNotContain("super-secret-leak-check-value").doesNotContain("ciphertext");
+
+        String listBody = mockMvc.perform(get("/admin/api/monitors").with(admin()))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(listBody).doesNotContain("super-secret-leak-check-value").doesNotContain("ciphertext");
+    }
+
+    @Test
+    @DisplayName("編輯：secret 留空不變更既有值；非空覆寫")
+    void update_blankSecretUnchanged_nonBlankOverwrites() throws Exception {
+        AdminDto.CreateMonitorRequest createReq = new AdminDto.CreateMonitorRequest(
+                "monitor A", clientId, "https://target.example/api", "GET", null, null,
+                Map.of("appsecret", "original-value"),
+                60, true, CompareMode.WHOLE_BODY, List.of(), null, null, List.of(),
+                "{{value.x}}", true, 0, null);
+        Long id = idOf(mockMvc.perform(post("/admin/api/monitors")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(createReq)))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString());
+
+        // 留空（空字串）= 不變更
+        AdminDto.UpdateMonitorRequest blankUpdate = new AdminDto.UpdateMonitorRequest(
+                "monitor A", clientId, "https://target.example/api", "GET", null, null,
+                Map.of("appsecret", ""),
+                60, true, CompareMode.WHOLE_BODY, List.of(), null, null, List.of(),
+                "{{value.x}}", true, 0, null);
+        mockMvc.perform(put("/admin/api/monitors/{id}", id)
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(blankUpdate)))
+                .andExpect(status().isOk());
+
+        var row = monitorSecrets.findByMonitorId(id).stream().findFirst().orElseThrow();
+        assertThat(secretCipher.decrypt(row.getCiphertext(), row.getIv(), row.getKeyVersion(),
+                "monitor_secret:" + id + ":appsecret")).isEqualTo("original-value");
+
+        // 非空 = 覆寫
+        AdminDto.UpdateMonitorRequest overwrite = new AdminDto.UpdateMonitorRequest(
+                "monitor A", clientId, "https://target.example/api", "GET", null, null,
+                Map.of("appsecret", "new-value"),
+                60, true, CompareMode.WHOLE_BODY, List.of(), null, null, List.of(),
+                "{{value.x}}", true, 0, null);
+        mockMvc.perform(put("/admin/api/monitors/{id}", id)
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(overwrite)))
+                .andExpect(status().isOk());
+
+        var updatedRow = monitorSecrets.findByMonitorId(id).stream().findFirst().orElseThrow();
+        assertThat(secretCipher.decrypt(updatedRow.getCiphertext(), updatedRow.getIv(), updatedRow.getKeyVersion(),
+                "monitor_secret:" + id + ":appsecret")).isEqualTo("new-value");
+    }
+
+    @Test
+    @DisplayName("刪除單一 secret：不可回復，再刪一次回 404")
+    void deleteSecret_removesRow_thenNotFound() throws Exception {
+        AdminDto.CreateMonitorRequest req = new AdminDto.CreateMonitorRequest(
+                "monitor A", clientId, "https://target.example/api", "GET", null, null,
+                Map.of("appsecret", "value"),
+                60, true, CompareMode.WHOLE_BODY, List.of(), null, null, List.of(),
+                "{{value.x}}", true, 0, null);
+        Long id = idOf(mockMvc.perform(post("/admin/api/monitors")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString());
+
+        mockMvc.perform(delete("/admin/api/monitors/{id}/secrets/{name}", id, "appsecret")
+                        .with(admin()).with(csrf()))
+                .andExpect(status().isOk());
+        assertThat(monitorSecrets.findByMonitorId(id)).isEmpty();
+
+        mockMvc.perform(delete("/admin/api/monitors/{id}/secrets/{name}", id, "appsecret")
+                        .with(admin()).with(csrf()))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    @DisplayName("計算欄位自我引用 → 400，不寫入")
+    void createComputedField_selfReference_rejected() throws Exception {
+        ComputedField selfRef = new ComputedField("sign", "{{computed.sign}}",
+                List.of(new ComputedStep(HashAlgorithm.MD5, HashEncoding.HEX_UPPER, null)));
+        AdminDto.CreateMonitorRequest req = new AdminDto.CreateMonitorRequest(
+                "monitor A", clientId, "https://target.example/api", "GET", null, null, Map.of(),
+                60, true, CompareMode.WHOLE_BODY, List.of(), null, null, List.of(selfRef),
+                "{{value.x}}", true, 0, null);
+
+        mockMvc.perform(post("/admin/api/monitors")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"));
+        assertThat(monitors.findAll()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("計算欄位引用未宣告的 secret → 400")
+    void createComputedField_unknownSecret_rejected() throws Exception {
+        AdminDto.CreateMonitorRequest req = new AdminDto.CreateMonitorRequest(
+                "monitor A", clientId, "https://target.example/api", "GET", null, null, Map.of(),
+                60, true, CompareMode.WHOLE_BODY, List.of(), null, null, List.of(signField()),
+                "{{value.x}}", true, 0, null);
+
+        mockMvc.perform(post("/admin/api/monitors")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"));
+    }
+
+    @Test
+    @DisplayName("header／URL 可以引用 {{computed.NAME}}，存檔時驗證通過")
+    void createWithHeaderReferencingComputedField_accepted() throws Exception {
+        AdminDto.CreateMonitorRequest req = new AdminDto.CreateMonitorRequest(
+                "monitor A", clientId, "https://target.example/api?ts={{now.epochSeconds}}", "GET", null,
+                Map.of("sign", "{{computed.sign}}"),
+                Map.of("appsecret", "s", "deviceid", "d"),
+                60, true, CompareMode.WHOLE_BODY, List.of(), null, null, List.of(signField()),
+                "{{value.x}}", true, 0, null);
+
+        mockMvc.perform(post("/admin/api/monitors")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isCreated());
     }
 }

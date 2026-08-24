@@ -1,6 +1,7 @@
 package com.jason.notifyline.monitor;
 
 import com.jason.notifyline.monitor.domain.CompareMode;
+import com.jason.notifyline.monitor.domain.ComputedField;
 import com.jason.notifyline.monitor.domain.ExtractRule;
 
 import java.util.List;
@@ -43,6 +44,13 @@ import java.util.Set;
  * @param firstRun       {@code monitor.getLastRunAt() == null}——<strong>不可</strong>用
  *                       {@code seenKeys.isEmpty()} 代替，理由見 {@code ChangeDetector.detectNewItems}
  * @param seenKeys       僅 {@code compareMode = NEW_ITEMS} 時非空
+ * @param secrets        這個監控的全部 secret 明文（{@code name -> value}），{@code claim()}
+ *                       時已解密——理由跟 {@code headers} 一樣：抓取發生在交易之外，不能拿著
+ *                       entity 或密文到處傳。<strong>絕不可再往外傳</strong>（DTO、log、
+ *                       {@code api_monitor_run}、LINE 訊息），只給
+ *                       {@code ComputedFieldEvaluator} 使用。見
+ *                       {@code Docs/plan/13-監控計算欄位設計.md} §5
+ * @param computedFields 依序求值的計算欄位定義（{@code claim()} 時已從 JSONB 解析）
  */
 public record ClaimedMonitor(
         Long id,
@@ -59,7 +67,9 @@ public record ClaimedMonitor(
         byte[] lastFingerprint,
         Map<String, String> lastState,
         boolean firstRun,
-        Set<String> seenKeys) {
+        Set<String> seenKeys,
+        Map<String, String> secrets,
+        List<ComputedField> computedFields) {
 
     public ClaimedMonitor {
         headers = headers == null ? Map.of() : Map.copyOf(headers);
@@ -67,6 +77,31 @@ public record ClaimedMonitor(
         lastFingerprint = lastFingerprint == null ? null : lastFingerprint.clone();
         lastState = lastState == null ? Map.of() : Map.copyOf(lastState);
         seenKeys = seenKeys == null ? Set.of() : Set.copyOf(seenKeys);
+        secrets = secrets == null ? Map.of() : Map.copyOf(secrets);
+        computedFields = computedFields == null ? List.of() : List.copyOf(computedFields);
+    }
+
+    /**
+     * 舊有呼叫端（不涉及 secret／計算欄位的既有測試）的簡便建構子：{@code secrets} /
+     * {@code computedFields} 預設空，行為等同「這個監控沒有設定計算欄位」。
+     */
+    public ClaimedMonitor(Long id,
+                          String name,
+                          String url,
+                          String method,
+                          String requestBody,
+                          Map<String, String> headers,
+                          CompareMode compareMode,
+                          List<ExtractRule> extractRules,
+                          String itemPointer,
+                          String itemKeyPointer,
+                          String messageTemplate,
+                          byte[] lastFingerprint,
+                          Map<String, String> lastState,
+                          boolean firstRun,
+                          Set<String> seenKeys) {
+        this(id, name, url, method, requestBody, headers, compareMode, extractRules, itemPointer, itemKeyPointer,
+                messageTemplate, lastFingerprint, lastState, firstRun, seenKeys, Map.of(), List.of());
     }
 
     /** 防禦性複製，理由同 {@code ApiMonitor.getLastFingerprint()}。 */

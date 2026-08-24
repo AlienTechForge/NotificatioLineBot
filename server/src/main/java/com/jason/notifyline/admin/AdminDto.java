@@ -9,6 +9,7 @@ import com.jason.notifyline.monitor.MonitorTestOutcome;
 import com.jason.notifyline.monitor.domain.ApiMonitor;
 import com.jason.notifyline.monitor.domain.ApiMonitorRun;
 import com.jason.notifyline.monitor.domain.CompareMode;
+import com.jason.notifyline.monitor.domain.ComputedField;
 import com.jason.notifyline.monitor.domain.ExtractRule;
 import com.jason.notifyline.monitor.session.SiteSession;
 import com.jason.notifyline.notification.domain.Notification;
@@ -272,7 +273,9 @@ public final class AdminDto {
     /**
      * 監控清單一列，同時也是後台編輯抽屜的預填資料。<strong>刻意不含</strong>
      * {@code headers_ciphertext}、{@code headers_iv} 或解密後的 header 值——理由同類別
-     * 註解：{@code hasHeaders} 只說「有沒有設定」，不透露內容。
+     * 註解：{@code hasHeaders} 只說「有沒有設定」，不透露內容。{@code secretNames} 同理
+     * ——只有名稱，<strong>絕不含 secret 值</strong>。{@code computedFields} 本身不是
+     * 機敏資料（只是公式：輸入模板 + 演算法 + 編碼），可以完整回傳。
      */
     public record MonitorSummary(
             Long id,
@@ -284,12 +287,14 @@ public final class AdminDto {
             String method,
             String requestBody,
             boolean hasHeaders,
+            List<String> secretNames,
             int intervalSeconds,
             boolean enabled,
             CompareMode compareMode,
             List<ExtractRule> extractRules,
             String itemPointer,
             String itemKeyPointer,
+            List<ComputedField> computedFields,
             String messageTemplate,
             boolean notifyOnFailure,
             int cooldownSeconds,
@@ -301,12 +306,13 @@ public final class AdminDto {
             Instant createdAt) {
 
         public static MonitorSummary from(ApiMonitor m, String clientId, String clientName,
-                                          List<ExtractRule> extractRules) {
+                                          List<ExtractRule> extractRules, List<String> secretNames,
+                                          List<ComputedField> computedFields) {
             return new MonitorSummary(
                     m.getId(), m.getName(), clientId, clientName, m.getUrl(), hostOf(m.getUrl()), m.getMethod(),
-                    m.getRequestBody(), m.getHeadersCiphertext() != null, m.getIntervalSeconds(), m.isEnabled(),
-                    m.getCompareMode(), extractRules, m.getItemPointer(), m.getItemKeyPointer(),
-                    m.getMessageTemplate(), m.isNotifyOnFailure(), m.getCooldownSeconds(),
+                    m.getRequestBody(), m.getHeadersCiphertext() != null, secretNames, m.getIntervalSeconds(),
+                    m.isEnabled(), m.getCompareMode(), extractRules, m.getItemPointer(), m.getItemKeyPointer(),
+                    computedFields, m.getMessageTemplate(), m.isNotifyOnFailure(), m.getCooldownSeconds(),
                     m.getMaxNotificationsPerDay(), m.getConsecutiveFailures(), m.isFailureNotified(),
                     m.getLastRunAt(), m.getNextRunAt(), m.getCreatedAt());
         }
@@ -324,9 +330,18 @@ public final class AdminDto {
     /**
      * 建立監控。
      *
-     * @param headers null 或空 map = 這個監控沒有自訂 header（不同於編輯時「留空 = 不變更」——
-     *                建立當下根本沒有「既有值」可以不變更）
-     * @param enabled null 預設 true
+     * @param headers        null 或空 map = 這個監控沒有自訂 header（不同於編輯時「留空 =
+     *                       不變更」——建立當下根本沒有「既有值」可以不變更）
+     * @param enabled        null 預設 true
+     * @param secrets        新增的 secret（{@code name -> 明文值}）。建立當下沒有「既有值」，
+     *                       所以這裡<strong>不</strong>套用編輯時「留空 = 不變更」那套慣例——
+     *                       每一筆非空白值都會被寫入，空白值直接忽略（不會建立一個空字串的
+     *                       secret）。見 {@code Docs/plan/13-監控計算欄位設計.md} §7
+     * @param computedFields 依序求值的計算欄位。存檔時驗證：名稱格式、
+     *                       {@code steps} 非空、HMAC 需要 {@code keySecret}、佔位符只能引用
+     *                       {@code secret.*}（這次請求裡的非空白項目）／{@code now.*}／
+     *                       {@code uuid}／陣列中<strong>更早</strong>的 {@code computed.*}——
+     *                       前向引用、自我引用、未知佔位符一律 400
      */
     public record CreateMonitorRequest(
             @NotBlank(message = "name is required")
@@ -342,6 +357,8 @@ public final class AdminDto {
 
             Map<String, String> headers,
 
+            Map<String, String> secrets,
+
             int intervalSeconds,
 
             Boolean enabled,
@@ -354,6 +371,8 @@ public final class AdminDto {
 
             String itemKeyPointer,
 
+            List<ComputedField> computedFields,
+
             @NotBlank(message = "messageTemplate is required") String messageTemplate,
 
             Boolean notifyOnFailure,
@@ -361,13 +380,32 @@ public final class AdminDto {
             Integer cooldownSeconds,
 
             Integer maxNotificationsPerDay) {
+
+        /** 舊有呼叫端（不涉及 secret／計算欄位的既有測試）的簡便建構子。 */
+        public CreateMonitorRequest(String name, String clientId, String url, String method, String requestBody,
+                                    Map<String, String> headers, int intervalSeconds, Boolean enabled,
+                                    CompareMode compareMode, List<ExtractRule> extractRules, String itemPointer,
+                                    String itemKeyPointer, String messageTemplate, Boolean notifyOnFailure,
+                                    Integer cooldownSeconds, Integer maxNotificationsPerDay) {
+            this(name, clientId, url, method, requestBody, headers, Map.of(), intervalSeconds, enabled, compareMode,
+                    extractRules, itemPointer, itemKeyPointer, List.of(), messageTemplate, notifyOnFailure,
+                    cooldownSeconds, maxNotificationsPerDay);
+        }
     }
 
     /**
      * 更新監控（整份取代語意，PUT）。
      *
-     * @param headers null 或空 map = <strong>不變更</strong>既有 header；非空 = 整份覆寫。
-     *                沒有「明確清除」的表示法——真的要清掉自訂 header，目前只能作廢重建
+     * @param headers        null 或空 map = <strong>不變更</strong>既有 header；非空 = 整份覆寫。
+     *                       沒有「明確清除」的表示法——真的要清掉自訂 header，目前只能作廢重建
+     * @param secrets        新增／覆寫的 secret（{@code name -> 明文值}）。<strong>每一筆的
+     *                       空白值代表「這個名稱不變更」</strong>，同 header 的既有慣例——
+     *                       跟 header 不同的是這裡是<strong>逐筆</strong>判斷，不是整個
+     *                       map 一起判斷（既有的其他 secret 名稱本來就不受這次請求影響）。
+     *                       刪除單一 secret 走另一個端點
+     *                       （{@code DELETE /monitors/{id}/secrets/{name}}），不透過這裡
+     * @param computedFields 同 {@link CreateMonitorRequest#computedFields}；{@code null}
+     *                       視為空清單（沒有計算欄位）
      */
     public record UpdateMonitorRequest(
             @NotBlank(message = "name is required")
@@ -383,6 +421,8 @@ public final class AdminDto {
 
             Map<String, String> headers,
 
+            Map<String, String> secrets,
+
             int intervalSeconds,
 
             Boolean enabled,
@@ -395,6 +435,8 @@ public final class AdminDto {
 
             String itemKeyPointer,
 
+            List<ComputedField> computedFields,
+
             @NotBlank(message = "messageTemplate is required") String messageTemplate,
 
             Boolean notifyOnFailure,
@@ -402,6 +444,17 @@ public final class AdminDto {
             Integer cooldownSeconds,
 
             Integer maxNotificationsPerDay) {
+
+        /** 舊有呼叫端（不涉及 secret／計算欄位的既有測試）的簡便建構子。 */
+        public UpdateMonitorRequest(String name, String clientId, String url, String method, String requestBody,
+                                    Map<String, String> headers, int intervalSeconds, Boolean enabled,
+                                    CompareMode compareMode, List<ExtractRule> extractRules, String itemPointer,
+                                    String itemKeyPointer, String messageTemplate, Boolean notifyOnFailure,
+                                    Integer cooldownSeconds, Integer maxNotificationsPerDay) {
+            this(name, clientId, url, method, requestBody, headers, Map.of(), intervalSeconds, enabled, compareMode,
+                    extractRules, itemPointer, itemKeyPointer, List.of(), messageTemplate, notifyOnFailure,
+                    cooldownSeconds, maxNotificationsPerDay);
+        }
     }
 
     /** 啟用／停用。 */
@@ -412,6 +465,17 @@ public final class AdminDto {
      * 試跑：body 帶完整設定，<strong>未存檔也可</strong>。刻意沒有 {@code clientId}、
      * {@code intervalSeconds} 等排程/發送相關欄位——試跑不建立排程、不綁定 client、
      * 更不會發送，這些欄位對它沒有意義。
+     *
+     * @param monitorId 選填：已存在的監控 id。非 null 時，{@code computedFields} 裡
+     *                  引用的 {@code {{secret.NAME}}} 若在 {@code secrets} 沒有給非空白的
+     *                  覆寫值，會改用這個監控<strong>已存好</strong>的 secret（解密後的
+     *                  明文只活在這次請求的處理過程中，不會被回傳）——不這樣做的話，每次
+     *                  試算都得把 secret 重新貼一次，體驗上不可行。{@code null} = 完全未
+     *                  存檔的草稿，這時只能用 {@code secrets} 裡直接給的值
+     * @param secrets   這次試算要用的 secret 明文覆寫（{@code name -> value}）。空白值
+     *                  代表「這個名稱不覆寫」，交給 {@code monitorId} 對應的既有值（若有）
+     * @param computedFields 依序求值的計算欄位，規則同
+     *                  {@link CreateMonitorRequest#computedFields}
      */
     public record MonitorTestRequest(
             String name,
@@ -424,6 +488,8 @@ public final class AdminDto {
 
             Map<String, String> headers,
 
+            Map<String, String> secrets,
+
             @NotNull(message = "compareMode is required") CompareMode compareMode,
 
             List<ExtractRule> extractRules,
@@ -432,7 +498,20 @@ public final class AdminDto {
 
             String itemKeyPointer,
 
-            @NotBlank(message = "messageTemplate is required") String messageTemplate) {
+            List<ComputedField> computedFields,
+
+            @NotBlank(message = "messageTemplate is required") String messageTemplate,
+
+            Long monitorId) {
+
+        /** 舊有呼叫端（不涉及 secret／計算欄位的既有測試）的簡便建構子。 */
+        public MonitorTestRequest(String name, String url, String method, String requestBody,
+                                  Map<String, String> headers, CompareMode compareMode,
+                                  List<ExtractRule> extractRules, String itemPointer, String itemKeyPointer,
+                                  String messageTemplate) {
+            this(name, url, method, requestBody, headers, Map.of(), compareMode, extractRules, itemPointer,
+                    itemKeyPointer, List.of(), messageTemplate, null);
+        }
     }
 
     /**
@@ -452,6 +531,9 @@ public final class AdminDto {
      * @param bodyTruncated      {@code body} 是否已被截斷；{@code values} /
      *                           {@code renderedMessage} 不受截斷影響，一律來自完整回應
      * @param bodyOriginalLength 截斷前的原始長度（UTF-8 位元組數）
+     * @param computedValues   計算欄位求出的最終值（{@code name -> 值}，多半是雜湊），
+     *                         見 {@link MonitorTestOutcome.Success#computedValues()}。
+     *                         {@code ok=false} 時恆為空 map——<strong>絕不含 secret 值</strong>
      */
     public record MonitorTestResult(
             boolean ok,
@@ -463,7 +545,8 @@ public final class AdminDto {
             String renderedMessage,
             String body,
             boolean bodyTruncated,
-            int bodyOriginalLength) {
+            int bodyOriginalLength,
+            Map<String, String> computedValues) {
 
         public record ItemPreview(String itemKey, Map<String, String> fields) {
             public static ItemPreview from(MonitorTestOutcome.ItemPreview p) {
@@ -474,15 +557,16 @@ public final class AdminDto {
         public static MonitorTestResult from(MonitorTestOutcome outcome) {
             return switch (outcome) {
                 case MonitorTestOutcome.Blocked b -> new MonitorTestResult(
-                        false, null, "BLOCKED_URL", b.message(), Map.of(), List.of(), null, null, false, 0);
+                        false, null, "BLOCKED_URL", b.message(), Map.of(), List.of(), null, null, false, 0, Map.of());
                 case MonitorTestOutcome.FetchFailed f -> new MonitorTestResult(
-                        false, f.httpStatus(), f.reason(), f.detail(), Map.of(), List.of(), null, null, false, 0);
+                        false, f.httpStatus(), f.reason(), f.detail(), Map.of(), List.of(), null, null, false, 0,
+                        Map.of());
                 case MonitorTestOutcome.ParseFailed p -> new MonitorTestResult(
-                        false, null, "PARSE_ERROR", p.detail(), Map.of(), List.of(), null, null, false, 0);
+                        false, null, "PARSE_ERROR", p.detail(), Map.of(), List.of(), null, null, false, 0, Map.of());
                 case MonitorTestOutcome.Success s -> new MonitorTestResult(
                         true, s.httpStatus(), null, null, s.values(),
                         s.items().stream().map(ItemPreview::from).toList(), s.renderedMessage(),
-                        s.body(), s.bodyTruncated(), s.bodyOriginalLength());
+                        s.body(), s.bodyTruncated(), s.bodyOriginalLength(), s.computedValues());
             };
         }
     }
