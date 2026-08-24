@@ -162,6 +162,117 @@ class ApiMonitorTestRunnerTest {
         assertThat(success.values()).containsEntry("status", "OK");
         assertThat(success.items()).isEmpty();
         assertThat(success.renderedMessage()).isEqualTo("目前狀態：OK");
+        // 這是這一波（Docs/plan/12-API監控易用性升級.md §4.2）刻意放寬的部分：成功時要帶原始 body，
+        // 供前端畫欄位選取樹——見 MonitorTestOutcome 類別註解「這是刻意放寬的例外」。
+        assertThat(success.body()).isEqualTo("{\"status\":\"OK\"}");
+        assertThat(success.bodyTruncated()).isFalse();
+        assertThat(success.bodyOriginalLength()).isEqualTo("{\"status\":\"OK\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+    }
+
+    // ------------------------------------------------------------ 回傳給瀏覽器的 body：256 KB 第二層上限
+
+    private static final int MAX_TEST_BODY_BYTES = 256 * 1024;
+
+    /** 建一段剛好 {@code byteLength} 位元組（全 ASCII，位元組數＝字元數）的合法 JSON 字串：{"pad":"aaa...a"}。 */
+    private static String jsonBodyOfByteLength(int byteLength) {
+        String prefix = "{\"pad\":\"";
+        String suffix = "\"}";
+        int padLength = byteLength - prefix.length() - suffix.length();
+        return prefix + "a".repeat(padLength) + suffix;
+    }
+
+    @Test
+    @DisplayName("body 剛好等於 256 KB 上限：不截斷，bodyOriginalLength 等於實際長度")
+    void success_bodyExactlyAtCap_notTruncated() {
+        ApiMonitorTestRunner.TestConfig cfg = new ApiMonitorTestRunner.TestConfig(
+                "test monitor", URI.create("https://target.example/api"), "GET", null, Map.of(),
+                CompareMode.WHOLE_BODY, List.of(), null, null, "{{value.x}}");
+        String body = jsonBodyOfByteLength(MAX_TEST_BODY_BYTES);
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", body));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), isNull(), isNull()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of(), List.of()));
+        when(messageTemplate.render(any(), any())).thenReturn("");
+
+        MonitorTestOutcome.Success success = (MonitorTestOutcome.Success) runner.run(cfg);
+
+        assertThat(success.bodyTruncated()).isFalse();
+        assertThat(success.bodyOriginalLength()).isEqualTo(MAX_TEST_BODY_BYTES);
+        assertThat(success.body()).isEqualTo(body);
+    }
+
+    @Test
+    @DisplayName("body 超過 256 KB 上限一個位元組：截斷，bodyOriginalLength 保留原始長度，回傳的 body 縮到上限以內")
+    void success_bodyExceedsCapByOneByte_isTruncated() {
+        ApiMonitorTestRunner.TestConfig cfg = new ApiMonitorTestRunner.TestConfig(
+                "test monitor", URI.create("https://target.example/api"), "GET", null, Map.of(),
+                CompareMode.WHOLE_BODY, List.of(), null, null, "{{value.x}}");
+        String body = jsonBodyOfByteLength(MAX_TEST_BODY_BYTES + 1);
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", body));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), isNull(), isNull()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of(), List.of()));
+        when(messageTemplate.render(any(), any())).thenReturn("");
+
+        MonitorTestOutcome.Success success = (MonitorTestOutcome.Success) runner.run(cfg);
+
+        assertThat(success.bodyTruncated()).isTrue();
+        assertThat(success.bodyOriginalLength()).isEqualTo(MAX_TEST_BODY_BYTES + 1);
+        assertThat(success.body()).hasSize(MAX_TEST_BODY_BYTES);
+        assertThat(body).startsWith(success.body());
+    }
+
+    @Test
+    @DisplayName("body 被截斷時，values／renderedMessage 仍是用完整、未截斷的 body 算出來的")
+    void success_bodyTruncated_valuesStillComputedFromFullBody() {
+        ApiMonitorTestRunner.TestConfig cfg = config(CompareMode.EXTRACTED); // extractRule: status -> /status
+        String tail = "{\"status\":\"OK\"}"; // 真正要抽取的內容藏在超過截斷點之後
+        String padding = "a".repeat(MAX_TEST_BODY_BYTES + 1000);
+        String hugeBody = "{\"pad\":\"" + padding + "\",\"status\":\"OK\"}";
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", hugeBody));
+        when(changeDetector.detectByFingerprint(eq(CompareMode.EXTRACTED), eq(hugeBody),
+                eq(cfg.extractRules()), isNull(), isNull()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", "OK"), List.of()));
+        when(messageTemplate.render(eq("{{value.status}}"), any())).thenReturn("目前狀態：OK");
+
+        MonitorTestOutcome.Success success = (MonitorTestOutcome.Success) runner.run(cfg);
+
+        // changeDetector 收到的是完整、未截斷的 hugeBody（上面的 eq(hugeBody) 就是這個斷言的一部分：
+        // 如果 runner 不小心把截斷後的字串傳進去，這個 stub 根本不會命中，changeDetector 會回
+        // Mockito 的預設值而不是 unchanged，下面兩個斷言就會失敗）。
+        assertThat(success.values()).containsEntry("status", "OK");
+        assertThat(success.renderedMessage()).isEqualTo("目前狀態：OK");
+        // 但回給瀏覽器的 body 本身確實被截斷了。
+        assertThat(success.bodyTruncated()).isTrue();
+        assertThat(success.body()).hasSize(MAX_TEST_BODY_BYTES);
+    }
+
+    @Test
+    @DisplayName("body 內容絕不出現在任何 log 事件裡，即使成功回傳了它")
+    void success_neverLogsBodyContent() {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(ApiMonitorTestRunner.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+                new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            String secretMarker = "SECRET_TOKEN_98765";
+            String body = "{\"status\":\"" + secretMarker + "\"}";
+            ApiMonitorTestRunner.TestConfig cfg = config(CompareMode.EXTRACTED);
+            when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", body));
+            when(changeDetector.detectByFingerprint(any(), any(), any(), isNull(), isNull()))
+                    .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", secretMarker), List.of()));
+            when(messageTemplate.render(any(), any())).thenReturn(secretMarker);
+
+            MonitorTestOutcome outcome = runner.run(cfg);
+
+            // 先確認這個 marker 真的有被回傳出去（不然下面「沒出現在 log 裡」的斷言毫無意義——
+            // 可能只是根本沒觸發到會記錄的路徑）。
+            assertThat(outcome).isInstanceOf(MonitorTestOutcome.Success.class);
+            assertThat(((MonitorTestOutcome.Success) outcome).body()).contains(secretMarker);
+            assertThat(appender.list).noneMatch(event -> event.getFormattedMessage().contains(secretMarker));
+        } finally {
+            logger.detachAppender(appender);
+        }
     }
 
     // ------------------------------------------------------------ 成功：NEW_ITEMS
@@ -212,6 +323,52 @@ class ApiMonitorTestRunnerTest {
         assertThat(success.items()).isEmpty();
         assertThat(success.renderedMessage()).isEmpty();
         verify(messageTemplate, never()).render(anyString(), any());
+    }
+
+    /**
+     * 點選欄位流程的第一步：NEW_ITEMS 模式下，使用者按「立即測試」時 itemPointer／itemKeyPointer
+     * 通常還沒設定（要靠這次抓到的 body 畫出樹，再從樹裡點選才能設定）。這時不可以呼叫
+     * {@link ChangeDetector#detectNewItems}——它會把「兩個 pointer 都還沒指到正確位置」
+     * 誤判成 ParseFailed，讓使用者連 body 都看不到，卡死整個 picker 流程。見
+     * {@code ApiMonitorTestRunner.previewNewItems} 的說明。
+     */
+    @Test
+    @DisplayName("NEW_ITEMS 且 itemPointer／itemKeyPointer 都還沒設定：回 Success 帶 body，不呼叫 ChangeDetector")
+    void success_newItemsMode_pointersNotYetSet_returnsBodyWithoutCallingChangeDetector() {
+        ApiMonitorTestRunner.TestConfig cfg = new ApiMonitorTestRunner.TestConfig(
+                "feed monitor", URI.create("https://target.example/feed"), "GET", null, Map.of(),
+                CompareMode.NEW_ITEMS, List.of(), null, null, "{{item.title}}");
+        String body = "{\"items\":[{\"id\":1,\"title\":\"hello\"}]}";
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", body));
+
+        MonitorTestOutcome outcome = runner.run(cfg);
+
+        assertThat(outcome).isInstanceOf(MonitorTestOutcome.Success.class);
+        MonitorTestOutcome.Success success = (MonitorTestOutcome.Success) outcome;
+        assertThat(success.body()).isEqualTo(body);
+        assertThat(success.bodyTruncated()).isFalse();
+        assertThat(success.items()).isEmpty();
+        assertThat(success.values()).isEmpty();
+        assertThat(success.renderedMessage()).isEmpty();
+        verify(changeDetector, never()).detectNewItems(any(), any(), any(), any(), any(), anyBoolean());
+        verify(messageTemplate, never()).render(anyString(), any());
+    }
+
+    @Test
+    @DisplayName("NEW_ITEMS 且只有 itemPointer 設了、itemKeyPointer 還沒設：同樣回 Success 帶 body，不呼叫 ChangeDetector")
+    void success_newItemsMode_onlyItemPointerSet_returnsBodyWithoutCallingChangeDetector() {
+        ApiMonitorTestRunner.TestConfig cfg = new ApiMonitorTestRunner.TestConfig(
+                "feed monitor", URI.create("https://target.example/feed"), "GET", null, Map.of(),
+                CompareMode.NEW_ITEMS, List.of(), "/items", null, "{{item.title}}");
+        String body = "{\"items\":[{\"id\":1,\"title\":\"hello\"}]}";
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", body));
+
+        MonitorTestOutcome outcome = runner.run(cfg);
+
+        MonitorTestOutcome.Success success = (MonitorTestOutcome.Success) outcome;
+        assertThat(success.body()).isEqualTo(body);
+        assertThat(success.items()).isEmpty();
+        verify(changeDetector, never()).detectNewItems(any(), any(), any(), any(), any(), anyBoolean());
     }
 
     // ------------------------------------------------------------ 站台登入狀態（cookie jar，見類別註解）

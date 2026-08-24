@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -64,6 +65,16 @@ import java.util.Set;
  * session 換掉」。若目標端點在試跑當下剛好回一組新的 {@code Set-Cookie}（例如輪換
  * CSRF token），這裡就讓它被丟棄，不去動 jar；下一次排程輪詢仍然用同一份儲存的
  * 登入狀態，行為可預期。
+ *
+ * <h2>成功時回傳原始 body（截斷至 {@value #MAX_TEST_BODY_BYTES} 位元組）</h2>
+ *
+ * <p>見 {@code Docs/plan/12-API監控易用性升級.md} §4.2：後台要把試跑抓到的回應渲染成
+ * 可展開的樹，點節點插入 JsonPointer，不再需要使用者手打一個「種子」pointer 才能展開。
+ * 這代表 {@code Docs/plan/11-API監控輪詢設計.md} §10「回傳的 DTO 絕不可包含…」對持久化
+ * 執行紀錄的限制，在這個完全不持久化、帶 {@code Cache-Control: no-store} 的端點上被
+ * 有意識地放寬——見 {@link MonitorTestOutcome} 類別註解的完整理由。{@link #boundBody}
+ * 只影響「要不要把整包 body 送回瀏覽器」這一步，{@code values} / {@code items} /
+ * {@code renderedMessage} 一律用完整、未截斷的 {@code success.body()} 算出來。
  */
 @Service
 public class ApiMonitorTestRunner {
@@ -72,6 +83,15 @@ public class ApiMonitorTestRunner {
 
     /** NEW_ITEMS 模式一則訊息最多列這麼多筆，其餘寫「還有 N 筆」——規則同 {@code ApiMonitorRunner}。 */
     private static final int MAX_ITEMS_PER_MESSAGE = 20;
+
+    /**
+     * 回傳給瀏覽器的原始 body 上限：256 KB。{@link ApiFetcher} 的
+     * {@code app.monitor.max-body-bytes}（預設 1 MB）保護的是「抓取」這一步，避免無限或
+     * 超大回應把伺服器記憶體吃光；這裡是<strong>第二層、更小的上限</strong>，收斂的是
+     * 「要不要把整包 body 一起送回瀏覽器讓它畫成可展開的樹」——256 KB 已經能涵蓋絕大多數
+     * 真實世界的 JSON API 回應，沒必要把抓取上限原封不動地丟給前端。
+     */
+    private static final int MAX_TEST_BODY_BYTES = 256 * 1024;
 
     private final OutboundUrlGuard guard;
     private final ApiFetcher fetcher;
@@ -133,10 +153,25 @@ public class ApiMonitorTestRunner {
                 config.compareMode(), success.body(), config.extractRules(), null, null);
         String message = messageTemplate.render(config.messageTemplate(), new MessageTemplate.RenderContext(
                 config.name(), result.currentValues(), Map.of(), Map.of()));
-        return new MonitorTestOutcome.Success(success.httpStatus(), result.currentValues(), List.of(), message);
+        BoundedBody body = boundBody(success.body());
+        return new MonitorTestOutcome.Success(success.httpStatus(), result.currentValues(), List.of(), message,
+                body.text(), body.truncated(), body.originalLength());
     }
 
     private MonitorTestOutcome.Success previewNewItems(TestConfig config, FetchResult.Success success) {
+        BoundedBody body = boundBody(success.body());
+
+        // itemPointer / itemKeyPointer 還沒設定：這是「點選欄位」流程的第一步——使用者
+        // 先按立即測試拿到 body，前端才有東西可以畫成樹，再從樹裡點節點回填這兩個
+        // pointer。這時還沒有「哪個是陣列、哪個是鍵」的資訊，不能呼叫
+        // ChangeDetector.detectNewItems（它要求兩者都指向真的存在的位置，否則會回
+        // ParseFailed，讓使用者連 body 都看不到，等於卡死整個 picker 流程）。直接回傳
+        // 空的項目預覽即可，body 已經夠前端把樹畫出來。
+        if (isBlank(config.itemPointer()) || isBlank(config.itemKeyPointer())) {
+            return new MonitorTestOutcome.Success(
+                    success.httpStatus(), Map.of(), List.of(), "", body.text(), body.truncated(), body.originalLength());
+        }
+
         ChangeResult result = changeDetector.detectNewItems(
                 success.body(), config.itemPointer(), config.itemKeyPointer(),
                 config.extractRules(), Set.of(), true);
@@ -145,7 +180,32 @@ public class ApiMonitorTestRunner {
                 .map(item -> new MonitorTestOutcome.ItemPreview(item.itemKey(), item.fields()))
                 .toList();
         return new MonitorTestOutcome.Success(
-                success.httpStatus(), Map.of(), preview, buildNewItemsMessage(config, items));
+                success.httpStatus(), Map.of(), preview, buildNewItemsMessage(config, items),
+                body.text(), body.truncated(), body.originalLength());
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    /**
+     * 把 {@code rawBody} 截到 {@link #MAX_TEST_BODY_BYTES} 位元組以內，供
+     * {@link MonitorTestOutcome.Success#body()} 使用。截斷點以 UTF-8 位元組計算，可能切在
+     * 多位元組字元中間——{@link String#String(byte[], int, int, java.nio.charset.Charset)}
+     * 對畸形序列的預設處理是替換成 U+FFFD，不會拋例外；前端要靠 {@code truncated} 旗標
+     * 明確提示使用者「這棵樹可能不完整」，而不是假裝截斷沒發生過。
+     */
+    private static BoundedBody boundBody(String rawBody) {
+        byte[] bytes = rawBody.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length <= MAX_TEST_BODY_BYTES) {
+            return new BoundedBody(rawBody, false, bytes.length);
+        }
+        String truncated = new String(bytes, 0, MAX_TEST_BODY_BYTES, StandardCharsets.UTF_8);
+        return new BoundedBody(truncated, true, bytes.length);
+    }
+
+    /** {@link #boundBody} 的回傳形狀：截斷後的文字、是否被截斷、截斷前的原始位元組數。 */
+    private record BoundedBody(String text, boolean truncated, int originalLength) {
     }
 
     /** 組裝規則抄 {@code ApiMonitorRunner.buildNewItemsMessage}：最多 20 筆，其餘寫「還有 N 筆」。 */

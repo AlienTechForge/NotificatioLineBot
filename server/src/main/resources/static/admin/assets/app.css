@@ -535,6 +535,7 @@ dialog::backdrop { background: rgb(4 8 16 / 0.55); backdrop-filter: blur(3px); }
 .notice--error   { background: var(--c-danger-soft);  color: var(--c-danger);  border-color: color-mix(in srgb, var(--c-danger) 35%, transparent); }
 .notice--success { background: var(--c-success-soft); color: var(--c-success); border-color: color-mix(in srgb, var(--c-success) 35%, transparent); }
 .notice--info    { background: var(--c-accent-soft); color: var(--c-accent); border-color: color-mix(in srgb, var(--c-accent) 35%, transparent); }
+.notice--warning { background: var(--c-warning-soft); color: var(--c-warning); border-color: color-mix(in srgb, var(--c-warning) 35%, transparent); }
 
 .empty, .loading { padding: var(--sp-6); text-align: center; color: var(--c-fg-muted); font-size: 14px; }
 
