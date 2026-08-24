@@ -155,7 +155,7 @@ public class ApiMonitorTestRunner {
                 config.name(), result.currentValues(), Map.of(), Map.of()));
         BoundedBody body = boundBody(success.body());
         return new MonitorTestOutcome.Success(success.httpStatus(), result.currentValues(), List.of(), message,
-                body.text(), body.truncated(), body.originalLength());
+                body.text(), body.truncated(), body.originalLength(), config.computedValues());
     }
 
     private MonitorTestOutcome.Success previewNewItems(TestConfig config, FetchResult.Success success) {
@@ -168,8 +168,8 @@ public class ApiMonitorTestRunner {
         // ParseFailed，讓使用者連 body 都看不到，等於卡死整個 picker 流程）。直接回傳
         // 空的項目預覽即可，body 已經夠前端把樹畫出來。
         if (isBlank(config.itemPointer()) || isBlank(config.itemKeyPointer())) {
-            return new MonitorTestOutcome.Success(
-                    success.httpStatus(), Map.of(), List.of(), "", body.text(), body.truncated(), body.originalLength());
+            return new MonitorTestOutcome.Success(success.httpStatus(), Map.of(), List.of(), "",
+                    body.text(), body.truncated(), body.originalLength(), config.computedValues());
         }
 
         ChangeResult result = changeDetector.detectNewItems(
@@ -181,7 +181,7 @@ public class ApiMonitorTestRunner {
                 .toList();
         return new MonitorTestOutcome.Success(
                 success.httpStatus(), Map.of(), preview, buildNewItemsMessage(config, items),
-                body.text(), body.truncated(), body.originalLength());
+                body.text(), body.truncated(), body.originalLength(), config.computedValues());
     }
 
     private static boolean isBlank(String value) {
@@ -233,8 +233,14 @@ public class ApiMonitorTestRunner {
      * 可能根本沒存過檔（{@code POST /monitors/test} 的整個重點），硬塞進
      * {@link ClaimedMonitor}（語意是「已從資料庫取件」）只會誤導讀者。
      *
-     * @param name 供 {@code {{monitor.name}}} 使用；未命名的草稿也要能測試，呼叫端
-     *             （{@code AdminService}）在名稱空白時代入一個佔位字串
+     * @param name           供 {@code {{monitor.name}}} 使用；未命名的草稿也要能測試，呼叫端
+     *                       （{@code AdminService}）在名稱空白時代入一個佔位字串
+     * @param computedValues 呼叫端（{@code AdminService}）已經用
+     *                       {@code ComputedFieldEvaluator} 求出的計算欄位最終值——{@code uri}／
+     *                       {@code requestBody}／{@code headers} 也已經用同一份值替換過
+     *                       {@code {{computed.NAME}}}，這裡只是單純把值原樣帶進
+     *                       {@link MonitorTestOutcome.Success} 供試算面板顯示，不會在這個
+     *                       類別裡重新求值
      */
     public record TestConfig(
             String name,
@@ -246,11 +252,21 @@ public class ApiMonitorTestRunner {
             List<ExtractRule> extractRules,
             String itemPointer,
             String itemKeyPointer,
-            String messageTemplate) {
+            String messageTemplate,
+            Map<String, String> computedValues) {
 
         public TestConfig {
             headers = headers == null ? Map.of() : Map.copyOf(headers);
             extractRules = extractRules == null ? List.of() : List.copyOf(extractRules);
+            computedValues = computedValues == null ? Map.of() : Map.copyOf(computedValues);
+        }
+
+        /** 舊有呼叫端（不涉及計算欄位的既有測試）的簡便建構子：{@code computedValues} 預設空。 */
+        public TestConfig(String name, URI uri, String method, String requestBody, Map<String, String> headers,
+                          CompareMode compareMode, List<ExtractRule> extractRules, String itemPointer,
+                          String itemKeyPointer, String messageTemplate) {
+            this(name, uri, method, requestBody, headers, compareMode, extractRules, itemPointer, itemKeyPointer,
+                    messageTemplate, Map.of());
         }
     }
 }

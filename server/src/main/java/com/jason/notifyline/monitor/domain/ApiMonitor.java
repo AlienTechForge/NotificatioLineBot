@@ -96,6 +96,15 @@ public class ApiMonitor {
     @Column(name = "message_template", nullable = false)
     private String messageTemplate;
 
+    /**
+     * JSONB 原文，格式見 {@code V6__monitor_computed.sql} 的欄位註解。理由同
+     * {@link #extractRules}：維持 {@code String}，反序列化留給實際使用它的
+     * {@code ComputedFieldEvaluator} / {@code ComputedFieldValidator} 負責。
+     */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "computed_fields", nullable = false)
+    private String computedFields;
+
     // -------------------------------------------------------------- 防洗版
 
     @Column(name = "notify_on_failure", nullable = false)
@@ -169,6 +178,35 @@ public class ApiMonitor {
                       int cooldownSeconds,
                       Integer maxNotificationsPerDay,
                       Instant now) {
+        this(name, clientId, url, method, requestBody, headersCiphertext, headersIv, headersKeyVersion,
+                intervalSeconds, enabled, compareMode, extractRules, itemPointer, itemKeyPointer, messageTemplate,
+                notifyOnFailure, cooldownSeconds, maxNotificationsPerDay, null, now);
+    }
+
+    /**
+     * 帶 {@code computed_fields}（W13）的完整建構子。上面那個少一個參數的版本是給
+     * 不關心計算欄位的既有呼叫端／測試用的簡便寫法，兩者共用同一份驗證與欄位指派邏輯。
+     */
+    public ApiMonitor(String name,
+                      Long clientId,
+                      String url,
+                      String method,
+                      String requestBody,
+                      byte[] headersCiphertext,
+                      byte[] headersIv,
+                      Integer headersKeyVersion,
+                      int intervalSeconds,
+                      boolean enabled,
+                      CompareMode compareMode,
+                      String extractRules,
+                      String itemPointer,
+                      String itemKeyPointer,
+                      String messageTemplate,
+                      boolean notifyOnFailure,
+                      int cooldownSeconds,
+                      Integer maxNotificationsPerDay,
+                      String computedFields,
+                      Instant now) {
         String normalizedMethod = validateAndNormalizeMethod(method);
         validateInterval(intervalSeconds);
         validateNewItemsPointers(compareMode, itemPointer, itemKeyPointer);
@@ -191,6 +229,7 @@ public class ApiMonitor {
         this.notifyOnFailure = notifyOnFailure;
         this.cooldownSeconds = cooldownSeconds;
         this.maxNotificationsPerDay = maxNotificationsPerDay;
+        this.computedFields = computedFields == null ? "[]" : computedFields;
         // 新建立的監控立刻可被取件抓第一次基準，不必等一個 interval —— 使用者建立
         // 監控是想馬上看到目前的值，不是想等待。
         this.nextRunAt = now;
@@ -298,6 +337,10 @@ public class ApiMonitor {
 
     public String getMessageTemplate() {
         return messageTemplate;
+    }
+
+    public String getComputedFields() {
+        return computedFields;
     }
 
     public boolean isNotifyOnFailure() {
@@ -458,6 +501,31 @@ public class ApiMonitor {
                             int cooldownSeconds,
                             Integer maxNotificationsPerDay,
                             Instant now) {
+        // 簡便版：不動既有的 computed_fields，理由同建構子的兩版分工——不關心
+        // 計算欄位的既有呼叫端／測試不必跟著改。
+        applyUpdate(name, clientId, url, method, requestBody, intervalSeconds, enabled, compareMode, extractRules,
+                itemPointer, itemKeyPointer, messageTemplate, notifyOnFailure, cooldownSeconds,
+                maxNotificationsPerDay, this.computedFields, now);
+    }
+
+    /** 帶 {@code computed_fields} 的完整版（W13）。 */
+    public void applyUpdate(String name,
+                            Long clientId,
+                            String url,
+                            String method,
+                            String requestBody,
+                            int intervalSeconds,
+                            boolean enabled,
+                            CompareMode compareMode,
+                            String extractRules,
+                            String itemPointer,
+                            String itemKeyPointer,
+                            String messageTemplate,
+                            boolean notifyOnFailure,
+                            int cooldownSeconds,
+                            Integer maxNotificationsPerDay,
+                            String computedFields,
+                            Instant now) {
         String normalizedMethod = validateAndNormalizeMethod(method);
         validateInterval(intervalSeconds);
         validateNewItemsPointers(compareMode, itemPointer, itemKeyPointer);
@@ -477,6 +545,7 @@ public class ApiMonitor {
         this.notifyOnFailure = notifyOnFailure;
         this.cooldownSeconds = cooldownSeconds;
         this.maxNotificationsPerDay = maxNotificationsPerDay;
+        this.computedFields = computedFields == null ? "[]" : computedFields;
         this.updatedAt = now;
     }
 

@@ -61,6 +61,11 @@ public sealed interface MonitorTestOutcome {
      *                         是從完整、未截斷的回應算出來的，不受影響
      * @param bodyOriginalLength 截斷前的原始長度（UTF-8 位元組數）；{@code bodyTruncated} 為
      *                         {@code false} 時等於 {@code body} 本身的位元組數
+     * @param computedValues   計算欄位求出的最終值（{@code name -> 值}，通常是雜湊）——
+     *                         使用者需要拿它跟瀏覽器實際送出的值比對，見
+     *                         {@code Docs/plan/13-監控計算欄位設計.md} §5、§7。<strong>絕不
+     *                         含 secret 值本身</strong>，只有 {@code ComputedFieldEvaluator}
+     *                         求出的最終結果（多半是雜湊）
      */
     record Success(Integer httpStatus,
                     Map<String, String> values,
@@ -68,12 +73,14 @@ public sealed interface MonitorTestOutcome {
                     String renderedMessage,
                     String body,
                     boolean bodyTruncated,
-                    int bodyOriginalLength) implements MonitorTestOutcome {
+                    int bodyOriginalLength,
+                    Map<String, String> computedValues) implements MonitorTestOutcome {
 
         public Success {
             values = values == null ? Map.of() : Map.copyOf(values);
             items = items == null ? List.of() : List.copyOf(items);
             body = body == null ? "" : body;
+            computedValues = computedValues == null ? Map.of() : Map.copyOf(computedValues);
         }
     }
 
