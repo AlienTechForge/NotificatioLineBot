@@ -1,9 +1,11 @@
 package com.jason.notifyline.admin;
 
 import com.jason.notifyline.common.ApiResponse;
+import com.jason.notifyline.monitor.importer.ImportedRequest;
 import com.jason.notifyline.notification.api.NotificationAccepted;
 import com.jason.notifyline.notification.api.NotificationDetail;
 import jakarta.validation.Valid;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -174,16 +176,53 @@ public class AdminController {
     /**
      * 試跑：body 帶完整設定（未存檔也可），抓一次、回傳抽出的值與渲染後的訊息。
      * 不發送、不寫入任何狀態。走跟排程完全相同的 {@code OutboundUrlGuard} 檢查。
+     *
+     * <p>成功時回應帶著目標 API 的原始回應內容（見 {@link AdminDto.MonitorTestResult}
+     * 類別註解），供後台畫成可展開的欄位選取樹——回應必須帶 {@code Cache-Control: no-store}，
+     * 理由跟 {@link #importMonitor} 一樣：內容機敏，不可被瀏覽器或中介的快取留存。
      */
     @PostMapping("/monitors/test")
-    public ApiResponse<AdminDto.MonitorTestResult> testMonitor(
+    public ResponseEntity<ApiResponse<AdminDto.MonitorTestResult>> testMonitor(
             @Valid @RequestBody AdminDto.MonitorTestRequest body) {
-        return ApiResponse.ok(adminService.testMonitor(body));
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(ApiResponse.ok(adminService.testMonitor(body)));
     }
 
     /** 最近 50 筆執行紀錄。 */
     @GetMapping("/monitors/{id}/runs")
     public ApiResponse<List<AdminDto.MonitorRunSummary>> monitorRuns(@PathVariable Long id) {
         return ApiResponse.ok(adminService.monitorRuns(id));
+    }
+
+    /**
+     * 匯入解析：把貼上的 cURL / {@code fetch(...)} / 自訂 JSON 解析成
+     * {@link ImportedRequest}，<strong>不存檔</strong>。見
+     * {@code Docs/plan/12-API監控易用性升級.md} §2.6。
+     *
+     * <p>回應帶 {@code Cache-Control: no-store}——貼上的內容含 cookie 與 API token，
+     * 解析出來的結果同樣機敏，不可被瀏覽器或中介的快取留存。
+     */
+    @PostMapping("/monitors/import")
+    public ResponseEntity<ApiResponse<ImportedRequest>> importMonitor(
+            @Valid @RequestBody AdminDto.ImportMonitorRequest body) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(ApiResponse.ok(adminService.importMonitorRequest(body.raw())));
+    }
+
+    // -------------------------------------------------------------- 站台登入狀態
+
+    /** 列出各 host 的登入狀態：cookie 名稱、數量、時間戳。絕不回傳值。 */
+    @GetMapping("/sessions")
+    public ApiResponse<List<AdminDto.SiteSessionSummary>> listSessions() {
+        return ApiResponse.ok(adminService.listSessions());
+    }
+
+    /** 清除某個 host 的登入狀態（不可回復）。 */
+    @DeleteMapping("/sessions/{host}")
+    public ApiResponse<Void> deleteSession(@PathVariable String host) {
+        adminService.deleteSession(host);
+        return ApiResponse.ok(null);
     }
 }

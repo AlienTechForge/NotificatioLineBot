@@ -3,7 +3,6 @@ package com.jason.notifyline.monitor;
 import com.jason.notifyline.monitor.domain.CompareMode;
 import com.jason.notifyline.monitor.domain.ExtractRule;
 
-import java.net.URI;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -23,7 +22,21 @@ import java.util.Set;
  * 那時會重新用 {@code id} 讀出當下最新的 managed entity，用這裡快照下來的舊值做判斷
  * 只會製造「取件當下」與「回寫當下」之間的過期資料風險——而這正是租約機制要避免的。
  *
- * @param headers        解密後的明文 header，供 {@code ApiFetcher} 直接使用
+ * @param url            <strong>原始樣板文字</strong>（{@code RequestTemplate} 意義下的
+ *                       模板，見 {@code Docs/plan/12-API監控易用性升級.md} §2.5），
+ *                       <strong>不是</strong>已經過變數替換與 {@code URI} 解析的結果。
+ *                       刻意延後到 {@code ApiMonitorRunner.execute()} 才做替換與解析，
+ *                       有兩個理由：(1) {@code URI.create()} 對字面的 {@code {{ }}}
+ *                       語法直接拋 {@code IllegalArgumentException}（Java 的 URI 解析器
+ *                       不接受 {@code { }} 這兩個字元），必須先替換完才能解析；
+ *                       (2) 更重要的是失敗隔離——{@code claim()} 一次取件一整批到期的
+ *                       監控，若在那筆交易內就做替換，單一監控的樣板錯誤（未知佔位符、
+ *                       畸形 pattern）會讓整個 {@code claim()} 交易失敗，拖累同一輪
+ *                       其他到期的監控全部取不到件。延後到 {@code execute()}（每筆監控
+ *                       各自在獨立的非同步工作上處理）才能讓樣板錯誤跟現有的
+ *                       {@code PARSE_ERROR} 一樣，只讓「這一筆」監控記一次失敗
+ * @param headers        解密後的明文 header（同樣是尚未替換的樣板文字），供
+ *                       {@code RequestTemplate} 替換後再交給 {@code ApiFetcher}
  * @param extractRules   {@code compareMode = NEW_ITEMS} 時，這組規則相對於<strong>每個
  *                       陣列元素</strong>解讀；其他模式相對於<strong>整個回應 body</strong>
  *                       解讀。同一個資料庫欄位、兩種解讀方式，見 §6.2 與本波次的既定決策
@@ -34,7 +47,7 @@ import java.util.Set;
 public record ClaimedMonitor(
         Long id,
         String name,
-        URI uri,
+        String url,
         String method,
         String requestBody,
         Map<String, String> headers,

@@ -182,6 +182,12 @@ class ApiMonitorStoreIT extends PostgresIntegrationTest {
         return new RunAttempt.Failure(Instant.now(), 10, "TIMEOUT", "request timed out", null);
     }
 
+    /** monitor 的 url 固定是 {@code https://target.example/api}（見 {@link #saveMonitor}），host 因此是 target.example。 */
+    private static RunAttempt.Failure sessionExpiryAttempt() {
+        return new RunAttempt.Failure(
+                Instant.now(), 10, "HTTP_ERROR", "HTTP 401", 401, "target.example");
+    }
+
     // ---------------------------------------------------------------- claim 併發
 
     @Test
@@ -325,6 +331,50 @@ class ApiMonitorStoreIT extends PostgresIntegrationTest {
         ApiMonitorRun run = latestRun(monitor.getId());
         assertThat(run.getOutcome()).isEqualTo(RunOutcome.FAILED);
         assertThat(run.getNotificationId()).isNull();
+    }
+
+    // ---------------------------------------------------------------- 登入過期偵測（W6）
+
+    @Test
+    @DisplayName("連續 401 達門檻：只發一則登入過期通知（不是一般失敗通知），且不會每輪重複")
+    void recordFailure_consecutive401_notifiesExpiryOnceNotPerPoll() {
+        ApiMonitor monitor = saveMonitor("needs-login", CompareMode.WHOLE_BODY, null, null, 0, null);
+        int threshold = properties.failureNotifyThreshold();
+        long notificationsBefore = notifications.count();
+
+        for (int i = 0; i < threshold; i++) {
+            store.recordFailure(claimOne(monitor.getId()), sessionExpiryAttempt());
+        }
+
+        assertThat(notifications.count()).as("達門檻只發一則").isEqualTo(notificationsBefore + 1);
+        assertThat(monitors.findById(monitor.getId()).orElseThrow().isFailureNotified()).isTrue();
+
+        var sent = notifications.findAll().stream()
+                .max(java.util.Comparator.comparing(com.jason.notifyline.notification.domain.Notification::getCreatedAt))
+                .orElseThrow();
+        assertThat(sent.getPayload()).contains("target.example").contains("登入已過期");
+
+        // 再連續失敗幾輪（同樣是 401），同一次故障期間不該再通知。
+        store.recordFailure(claimOne(monitor.getId()), sessionExpiryAttempt());
+        store.recordFailure(claimOne(monitor.getId()), sessionExpiryAttempt());
+        assertThat(notifications.count()).as("同一次故障只通知一次，不是一輪一則")
+                .isEqualTo(notificationsBefore + 1);
+    }
+
+    @Test
+    @DisplayName("一般失敗（非 401/403）達門檻：走既有的通用失敗通知，不是登入過期訊息")
+    void recordFailure_nonSessionFailure_usesGenericFailureMessage() {
+        ApiMonitor monitor = saveMonitor("generic-failure", CompareMode.WHOLE_BODY, null, null, 0, null);
+        int threshold = properties.failureNotifyThreshold();
+
+        for (int i = 0; i < threshold; i++) {
+            store.recordFailure(claimOne(monitor.getId()), failureAttempt());
+        }
+
+        var sent = notifications.findAll().stream()
+                .max(java.util.Comparator.comparing(com.jason.notifyline.notification.domain.Notification::getCreatedAt))
+                .orElseThrow();
+        assertThat(sent.getPayload()).doesNotContain("登入已過期").contains("連續失敗");
     }
 
     // ---------------------------------------------------------------- NEW_ITEMS 首次執行

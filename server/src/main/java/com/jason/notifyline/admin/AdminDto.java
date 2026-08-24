@@ -10,6 +10,7 @@ import com.jason.notifyline.monitor.domain.ApiMonitor;
 import com.jason.notifyline.monitor.domain.ApiMonitorRun;
 import com.jason.notifyline.monitor.domain.CompareMode;
 import com.jason.notifyline.monitor.domain.ExtractRule;
+import com.jason.notifyline.monitor.session.SiteSession;
 import com.jason.notifyline.notification.domain.Notification;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -435,12 +436,22 @@ public final class AdminDto {
     }
 
     /**
-     * 試跑結果。<strong>絕不含目標 API 的原始回應內容</strong>——只有抽出的值、
-     * {@code NEW_ITEMS} 模式的項目預覽，與渲染後的訊息文字。見 {@link MonitorTestOutcome}。
+     * 試跑結果。抓取成功時（{@code ok=true}）帶著抽出的值、{@code NEW_ITEMS} 模式的項目
+     * 預覽、渲染後的訊息文字，<strong>以及（可能被截斷的）目標 API 原始回應 body</strong>——
+     * 見 {@link MonitorTestOutcome} 類別註解「這是刻意放寬的例外」：{@code
+     * Docs/plan/11-API監控輪詢設計.md} §10 對持久化執行紀錄的「絕不回顯回應內容」規則，
+     * 不適用於這個完全不落地、帶 {@code Cache-Control: no-store} 的試跑端點。後台拿
+     * {@code body} 畫成可展開的樹，點節點插入 JsonPointer（見
+     * {@code Docs/plan/12-API監控易用性升級.md} §4.2）。
      *
-     * @param ok            true = 抓取與解析都成功（不代表「有變更」——試跑沒有比對基準）
-     * @param failureReason ok=false 時的分類：{@code BLOCKED_URL}、{@code PARSE_ERROR}，
-     *                       或 {@code FetchResult.Reason} 的名稱（{@code TIMEOUT} 等）
+     * @param ok                 true = 抓取與解析都成功（不代表「有變更」——試跑沒有比對基準）
+     * @param failureReason      ok=false 時的分類：{@code BLOCKED_URL}、{@code PARSE_ERROR}，
+     *                           或 {@code FetchResult.Reason} 的名稱（{@code TIMEOUT} 等）
+     * @param body               ok=true 時：抓到的原始回應內容，超過 256 KB 時被截斷；
+     *                           ok=false 時恆為 {@code null}
+     * @param bodyTruncated      {@code body} 是否已被截斷；{@code values} /
+     *                           {@code renderedMessage} 不受截斷影響，一律來自完整回應
+     * @param bodyOriginalLength 截斷前的原始長度（UTF-8 位元組數）
      */
     public record MonitorTestResult(
             boolean ok,
@@ -449,7 +460,10 @@ public final class AdminDto {
             String failureDetail,
             Map<String, String> values,
             List<ItemPreview> items,
-            String renderedMessage) {
+            String renderedMessage,
+            String body,
+            boolean bodyTruncated,
+            int bodyOriginalLength) {
 
         public record ItemPreview(String itemKey, Map<String, String> fields) {
             public static ItemPreview from(MonitorTestOutcome.ItemPreview p) {
@@ -460,14 +474,15 @@ public final class AdminDto {
         public static MonitorTestResult from(MonitorTestOutcome outcome) {
             return switch (outcome) {
                 case MonitorTestOutcome.Blocked b -> new MonitorTestResult(
-                        false, null, "BLOCKED_URL", b.message(), Map.of(), List.of(), null);
+                        false, null, "BLOCKED_URL", b.message(), Map.of(), List.of(), null, null, false, 0);
                 case MonitorTestOutcome.FetchFailed f -> new MonitorTestResult(
-                        false, f.httpStatus(), f.reason(), f.detail(), Map.of(), List.of(), null);
+                        false, f.httpStatus(), f.reason(), f.detail(), Map.of(), List.of(), null, null, false, 0);
                 case MonitorTestOutcome.ParseFailed p -> new MonitorTestResult(
-                        false, null, "PARSE_ERROR", p.detail(), Map.of(), List.of(), null);
+                        false, null, "PARSE_ERROR", p.detail(), Map.of(), List.of(), null, null, false, 0);
                 case MonitorTestOutcome.Success s -> new MonitorTestResult(
                         true, s.httpStatus(), null, null, s.values(),
-                        s.items().stream().map(ItemPreview::from).toList(), s.renderedMessage());
+                        s.items().stream().map(ItemPreview::from).toList(), s.renderedMessage(),
+                        s.body(), s.bodyTruncated(), s.bodyOriginalLength());
             };
         }
     }
@@ -487,6 +502,48 @@ public final class AdminDto {
                     r.getId(), r.getStartedAt(), r.getDurationMs(), r.getOutcome().name(),
                     r.getHttpStatus(), r.getErrorMessage(),
                     r.getNotificationId() == null ? null : r.getNotificationId().toString());
+        }
+    }
+
+    // ============================================================ 監控：匯入（W5）
+
+    /**
+     * 匯入端點的輸入：使用者貼上的原始內容（cURL / {@code fetch(...)} / 自訂 JSON）。
+     * 見 {@code Docs/plan/12-API監控易用性升級.md} §2.6。
+     *
+     * <p>64 KB 的大小上限刻意<strong>不</strong>用 {@code @Size} 在這裡表示——
+     * {@code @Size} 算的是字元數，貼上內容常含中文 header 值，字元數會低估實際
+     * 位元組數。實際的上限檢查在 {@code AdminService#importMonitorRequest}，用
+     * UTF-8 位元組長度。
+     */
+    public record ImportMonitorRequest(@NotBlank(message = "raw is required") String raw) {
+    }
+
+    // ============================================================ 站台登入狀態（W6）
+
+    /**
+     * 站台登入狀態（cookie jar）列表的一列。見
+     * {@code Docs/plan/12-API監控易用性升級.md} §3.4。
+     *
+     * <p><strong>刻意不含</strong> {@code jar_ciphertext}、{@code jar_iv} 或解密後的
+     * cookie 值——這個端點的整個重點就是「絕不回傳值」，只回 host、cookie
+     * 名稱、數量與時間戳，理由同類別註解。
+     */
+    public record SiteSessionSummary(
+            String host,
+            List<String> cookieNames,
+            int cookieCount,
+            Instant lastRefreshedAt,
+            Instant createdAt,
+            Instant updatedAt) {
+
+        public static SiteSessionSummary from(SiteSession session) {
+            List<String> names = session.getCookieNames() == null || session.getCookieNames().isBlank()
+                    ? List.of()
+                    : List.of(session.getCookieNames().split(","));
+            return new SiteSessionSummary(
+                    session.getHost(), names, names.size(),
+                    session.getLastRefreshedAt(), session.getCreatedAt(), session.getUpdatedAt());
         }
     }
 }

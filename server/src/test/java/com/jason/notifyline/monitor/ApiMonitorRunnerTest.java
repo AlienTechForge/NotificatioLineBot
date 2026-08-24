@@ -10,6 +10,8 @@ import com.jason.notifyline.monitor.fetch.OutboundUrlGuard;
 import com.jason.notifyline.monitor.parse.ChangeDetector;
 import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
+import com.jason.notifyline.monitor.request.RequestTemplate;
+import com.jason.notifyline.monitor.session.SiteSessionService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -34,6 +36,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -59,6 +62,8 @@ class ApiMonitorRunnerTest {
     @Mock
     private ApiFetcher fetcher;
     @Mock
+    private SiteSessionService siteSessionService;
+    @Mock
     private ChangeDetector changeDetector;
     @Mock
     private MessageTemplate messageTemplate;
@@ -75,20 +80,29 @@ class ApiMonitorRunnerTest {
                 Duration.ofSeconds(5), Duration.ofSeconds(10), 1_048_576, "", 3,
                 Period.ofDays(14), Period.ofDays(90));
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        runner = new ApiMonitorRunner(
-                guard, fetcher, changeDetector, messageTemplate, store, properties, SAME_THREAD_EXECUTOR, clock);
+        // RequestTemplate 用真的實例（不是 mock）——這裡的固定測試網址／header 完全
+        // 沒有 {{ }} 佔位符，render() 是無害的原樣傳回，用真的實例比每個測試都要
+        // stub render()/renderHeaders() 簡單，樣板替換本身的行為另有 RequestTemplateTest 覆蓋。
+        RequestTemplate requestTemplate = new RequestTemplate(clock);
+        // 預設原樣傳回 header：這個類別要驗證的是編排邏輯，不是 cookie jar 本身的行為
+        // （那是 SiteSessionServiceTest 的職責）。lenient()——guard 擋下等案例根本不會
+        // 走到 attachCookies，嚴格模式下會被判定成「多餘的 stub」。
+        lenient().when(siteSessionService.attachCookies(any(), any()))
+                .thenAnswer(invocation -> invocation.getArgument(1));
+        runner = new ApiMonitorRunner(guard, fetcher, siteSessionService, changeDetector, messageTemplate,
+                requestTemplate, store, properties, SAME_THREAD_EXECUTOR, clock);
     }
 
     private static ClaimedMonitor monitor(CompareMode mode) {
         return new ClaimedMonitor(
-                1L, "my monitor", URI.create("https://target.example/api"), "GET", null, Map.of(),
+                1L, "my monitor", "https://target.example/api", "GET", null, Map.of(),
                 mode, List.of(new ExtractRule("status", "/status")), null, null,
                 "{{value.status}}", null, Map.of(), true, Set.of());
     }
 
     private static ClaimedMonitor newItemsMonitor() {
         return new ClaimedMonitor(
-                2L, "feed monitor", URI.create("https://target.example/feed"), "GET", null, Map.of(),
+                2L, "feed monitor", "https://target.example/feed", "GET", null, Map.of(),
                 CompareMode.NEW_ITEMS, List.of(new ExtractRule("title", "/title")), "/items", "/id",
                 "{{item.title}}", null, Map.of(), true, Set.of());
     }
@@ -105,7 +119,7 @@ class ApiMonitorRunnerTest {
         ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
         claims(claimed);
         doThrow(new OutboundUrlGuard.BlockedException("Target host resolves to a disallowed network address."))
-                .when(guard).check(claimed.uri());
+                .when(guard).check(URI.create(claimed.url()));
 
         runner.runOnce();
 
@@ -113,6 +127,50 @@ class ApiMonitorRunnerTest {
         verify(store).recordFailure(eq(claimed), captor.capture());
         assertThat(captor.getValue().classification()).isEqualTo("BLOCKED_URL");
         assertThat(captor.getValue().httpStatus()).isNull();
+        verify(fetcher, never()).fetch(any());
+    }
+
+    // ------------------------------------------------------------ 樣板替換 + guard 重新檢查（W5）
+
+    @Test
+    @DisplayName("URL 含佔位符：guard 檢查的是替換後的網址，fetch 也打替換後的網址（縱深防禦）")
+    void urlWithPlaceholder_guardAndFetchSeeSubstitutedUrl() {
+        ClaimedMonitor claimed = new ClaimedMonitor(
+                3L, "templated monitor", "https://target.example/api?ts={{now.epochSeconds}}", "GET", null,
+                Map.of("x-request-id", "{{uuid}}"),
+                CompareMode.WHOLE_BODY, List.of(new ExtractRule("status", "/status")), null, null,
+                "{{value.status}}", null, Map.of(), true, Set.of());
+        claims(claimed);
+        URI expectedUri = URI.create("https://target.example/api?ts=" + NOW.getEpochSecond());
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", "{}"));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), any(), any()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", "OK"), List.of()));
+
+        runner.runOnce();
+
+        verify(guard).check(expectedUri);
+        ArgumentCaptor<ApiFetcher.FetchRequest> captor = ArgumentCaptor.forClass(ApiFetcher.FetchRequest.class);
+        verify(fetcher).fetch(captor.capture());
+        assertThat(captor.getValue().uri()).isEqualTo(expectedUri);
+        assertThat(captor.getValue().headers()).containsKey("x-request-id");
+        assertThat(captor.getValue().headers().get("x-request-id")).isNotEqualTo("{{uuid}}");
+    }
+
+    @Test
+    @DisplayName("未知佔位符：分類 TEMPLATE_ERROR，完全不呼叫 guard 或 fetcher（跟 PARSE_ERROR 一樣走完整失敗記錄路徑）")
+    void unknownPlaceholder_recordsTemplateErrorFailure() {
+        ClaimedMonitor claimed = new ClaimedMonitor(
+                4L, "bad template monitor", "https://target.example/api?x={{totally.unknown}}", "GET", null,
+                Map.of(), CompareMode.WHOLE_BODY, List.of(), null, null,
+                "{{value.status}}", null, Map.of(), true, Set.of());
+        claims(claimed);
+
+        runner.runOnce();
+
+        ArgumentCaptor<RunAttempt.Failure> captor = ArgumentCaptor.forClass(RunAttempt.Failure.class);
+        verify(store).recordFailure(eq(claimed), captor.capture());
+        assertThat(captor.getValue().classification()).isEqualTo("TEMPLATE_ERROR");
+        verify(guard, never()).check(any());
         verify(fetcher, never()).fetch(any());
     }
 
@@ -265,6 +323,86 @@ class ApiMonitorRunnerTest {
 
         verify(changeDetector).detectNewItems(
                 any(), eq("/items"), eq("/id"), eq(claimed.extractRules()), eq(claimed.seenKeys()), eq(true));
+    }
+
+    // ------------------------------------------------------------ 站台登入狀態（W6）
+
+    @Test
+    @DisplayName("抓取前呼叫 attachCookies，帶上替換後的請求 host")
+    void attachesCookiesBeforeFetch_withResolvedHost() {
+        ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
+        claims(claimed);
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", "{}"));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), any(), any()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", "OK"), List.of()));
+
+        runner.runOnce();
+
+        verify(siteSessionService).attachCookies(eq("target.example"), eq(Map.of()));
+    }
+
+    @Test
+    @DisplayName("attachCookies 回傳的 header（含附加的 Cookie）原樣送進 fetch")
+    void fetchUsesHeadersReturnedByAttachCookies() {
+        ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
+        claims(claimed);
+        Map<String, String> withCookie = Map.of("cookie", "session=abc");
+        when(siteSessionService.attachCookies(eq("target.example"), any())).thenReturn(withCookie);
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", "{}"));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), any(), any()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", "OK"), List.of()));
+
+        runner.runOnce();
+
+        ArgumentCaptor<ApiFetcher.FetchRequest> captor = ArgumentCaptor.forClass(ApiFetcher.FetchRequest.class);
+        verify(fetcher).fetch(captor.capture());
+        assertThat(captor.getValue().headers()).isEqualTo(withCookie);
+    }
+
+    @Test
+    @DisplayName("回應後把 Set-Cookie 交給 mergeSetCookies，帶上請求 host")
+    void mergesSetCookiesAfterFetch() {
+        ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
+        claims(claimed);
+        when(fetcher.fetch(any())).thenReturn(
+                new FetchResult.Success(200, "application/json", "{}", List.of("session=new; Path=/")));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), any(), any()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", "OK"), List.of()));
+
+        runner.runOnce();
+
+        verify(siteSessionService).mergeSetCookies("target.example", List.of("session=new; Path=/"));
+    }
+
+    @Test
+    @DisplayName("guard 擋下時完全不呼叫 attachCookies——連 fetch 都沒發生")
+    void guardBlocked_doesNotAttachCookies() {
+        ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
+        claims(claimed);
+        doThrow(new OutboundUrlGuard.BlockedException("blocked"))
+                .when(guard).check(URI.create(claimed.url()));
+
+        runner.runOnce();
+
+        verify(siteSessionService, never()).attachCookies(any(), any());
+        verify(siteSessionService, never()).mergeSetCookies(any(), any());
+    }
+
+    @Test
+    @DisplayName("fetch 失敗（例如 401）一樣會嘗試合併 Set-Cookie，且失敗紀錄帶上 host")
+    void fetchFailure_stillMergesSetCookies_andRecordsHost() {
+        ClaimedMonitor claimed = monitor(CompareMode.WHOLE_BODY);
+        claims(claimed);
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Failure(
+                FetchResult.Reason.HTTP_ERROR, "HTTP 401", 401, List.of("csrf=fresh")));
+
+        runner.runOnce();
+
+        verify(siteSessionService).mergeSetCookies("target.example", List.of("csrf=fresh"));
+        ArgumentCaptor<RunAttempt.Failure> captor = ArgumentCaptor.forClass(RunAttempt.Failure.class);
+        verify(store).recordFailure(eq(claimed), captor.capture());
+        assertThat(captor.getValue().host()).isEqualTo("target.example");
+        assertThat(captor.getValue().httpStatus()).isEqualTo(401);
     }
 
     private static List<ChangeResult.NewItem> newItemList(int count) {
