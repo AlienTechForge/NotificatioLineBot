@@ -489,4 +489,18 @@ public final class AdminDto {
                     r.getNotificationId() == null ? null : r.getNotificationId().toString());
         }
     }
+
+    // ============================================================ 監控：匯入（W5）
+
+    /**
+     * 匯入端點的輸入：使用者貼上的原始內容（cURL / {@code fetch(...)} / 自訂 JSON）。
+     * 見 {@code Docs/plan/12-API監控易用性升級.md} §2.6。
+     *
+     * <p>64 KB 的大小上限刻意<strong>不</strong>用 {@code @Size} 在這裡表示——
+     * {@code @Size} 算的是字元數，貼上內容常含中文 header 值，字元數會低估實際
+     * 位元組數。實際的上限檢查在 {@code AdminService#importMonitorRequest}，用
+     * UTF-8 位元組長度。
+     */
+    public record ImportMonitorRequest(@NotBlank(message = "raw is required") String raw) {
+    }
 }

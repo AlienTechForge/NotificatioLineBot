@@ -1,9 +1,11 @@
 package com.jason.notifyline.admin;
 
 import com.jason.notifyline.common.ApiResponse;
+import com.jason.notifyline.monitor.importer.ImportedRequest;
 import com.jason.notifyline.notification.api.NotificationAccepted;
 import com.jason.notifyline.notification.api.NotificationDetail;
 import jakarta.validation.Valid;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -185,5 +187,21 @@ public class AdminController {
     @GetMapping("/monitors/{id}/runs")
     public ApiResponse<List<AdminDto.MonitorRunSummary>> monitorRuns(@PathVariable Long id) {
         return ApiResponse.ok(adminService.monitorRuns(id));
+    }
+
+    /**
+     * 匯入解析：把貼上的 cURL / {@code fetch(...)} / 自訂 JSON 解析成
+     * {@link ImportedRequest}，<strong>不存檔</strong>。見
+     * {@code Docs/plan/12-API監控易用性升級.md} §2.6。
+     *
+     * <p>回應帶 {@code Cache-Control: no-store}——貼上的內容含 cookie 與 API token，
+     * 解析出來的結果同樣機敏，不可被瀏覽器或中介的快取留存。
+     */
+    @PostMapping("/monitors/import")
+    public ResponseEntity<ApiResponse<ImportedRequest>> importMonitor(
+            @Valid @RequestBody AdminDto.ImportMonitorRequest body) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(ApiResponse.ok(adminService.importMonitorRequest(body.raw())));
     }
 }
