@@ -2,6 +2,7 @@ package com.jason.notifyline.monitor;
 
 import com.jason.notifyline.common.ApiException;
 import com.jason.notifyline.common.ErrorCode;
+import com.jason.notifyline.monitor.compute.ComputedFieldEvaluator;
 import com.jason.notifyline.monitor.domain.CompareMode;
 import com.jason.notifyline.monitor.domain.ExtractRule;
 import com.jason.notifyline.monitor.fetch.ApiFetcher;
@@ -84,13 +85,18 @@ class ApiMonitorRunnerTest {
         // 沒有 {{ }} 佔位符，render() 是無害的原樣傳回，用真的實例比每個測試都要
         // stub render()/renderHeaders() 簡單，樣板替換本身的行為另有 RequestTemplateTest 覆蓋。
         RequestTemplate requestTemplate = new RequestTemplate(clock);
+        // 真的實例，理由同 requestTemplate：這裡的固定測試監控全部沒有 computedFields
+        // （ClaimedMonitor 的簡便建構子預設空清單），evaluate() 對空清單原樣回傳空 map，
+        // 用真的實例比每個測試都要 stub 簡單，求值本身的行為另有專門的
+        // ComputedFieldEvaluatorTest 覆蓋。
+        ComputedFieldEvaluator computedFieldEvaluator = new ComputedFieldEvaluator();
         // 預設原樣傳回 header：這個類別要驗證的是編排邏輯，不是 cookie jar 本身的行為
         // （那是 SiteSessionServiceTest 的職責）。lenient()——guard 擋下等案例根本不會
         // 走到 attachCookies，嚴格模式下會被判定成「多餘的 stub」。
         lenient().when(siteSessionService.attachCookies(any(), any()))
                 .thenAnswer(invocation -> invocation.getArgument(1));
         runner = new ApiMonitorRunner(guard, fetcher, siteSessionService, changeDetector, messageTemplate,
-                requestTemplate, store, properties, SAME_THREAD_EXECUTOR, clock);
+                requestTemplate, computedFieldEvaluator, store, properties, SAME_THREAD_EXECUTOR, clock);
     }
 
     private static ClaimedMonitor monitor(CompareMode mode) {

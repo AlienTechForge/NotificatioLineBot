@@ -412,7 +412,32 @@
             <div class="field">
                 <label for="monHeaders">自訂 header（JSON，選填）</label>
                 <textarea id="monHeaders" placeholder='{"Authorization":"Bearer xxx"}'></textarea>
-                <p class="hint" id="monHeadersHint">格式：扁平的字串對字串 JSON 物件。</p>
+                <p class="hint" id="monHeadersHint">格式：扁平的字串對字串 JSON 物件。可用 <code>{{computed.NAME}}</code> 引用下面的計算欄位。</p>
+            </div>
+
+            <div class="field">
+                <p class="fieldset-label">密鑰（signing secret，例如 appsecret、device id）</p>
+                <p class="hint">計算欄位用 <code>{{secret.NAME}}</code> 引用。值加密儲存，後台只顯示名稱與「已設定」，絕不顯示值。</p>
+                <div id="monSecretsExisting"></div>
+                <div id="monSecretsNewRows"></div>
+                <button type="button" class="btn btn--sm" id="monAddSecret" style="margin-top:var(--sp-2)">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    新增密鑰
+                </button>
+            </div>
+
+            <div class="field">
+                <p class="fieldset-label">計算欄位（依序求值，可串接多段雜湊）</p>
+                <p class="hint">每個欄位的 <code>steps</code> 依序套用，前一段的輸出字串就是後一段的輸入——這是雙重雜湊
+                    （例如 <code>MD5(MD5(x).toUpperCase()).toUpperCase()</code>）能表示的原因。輸入可用
+                    <code>{{secret.NAME}}</code>、<code>{{now.epochSeconds}}</code>、<code>{{uuid}}</code>，以及
+                    <strong>更早</strong>定義的 <code>{{computed.NAME}}</code>；模板（URL/header/body）用
+                    <code>{{computed.NAME}}</code> 引用求出的值。</p>
+                <div id="monComputedRows"></div>
+                <button type="button" class="btn btn--sm" id="monAddComputedField" style="margin-top:var(--sp-2)">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    新增計算欄位
+                </button>
             </div>
 
             <div class="field">

@@ -16,6 +16,7 @@ import com.jason.notifyline.monitor.domain.RunOutcome;
 import com.jason.notifyline.monitor.domain.SeenItemId;
 import com.jason.notifyline.monitor.domain.SeenItemRepository;
 import com.jason.notifyline.monitor.parse.ChangeResult;
+import com.jason.notifyline.monitor.secret.MonitorSecretService;
 import com.jason.notifyline.notification.domain.NotificationDeliveryRepository;
 import com.jason.notifyline.notification.domain.NotificationRepository;
 import com.jason.notifyline.support.PostgresIntegrationTest;
@@ -87,6 +88,8 @@ class ApiMonitorStoreIT extends PostgresIntegrationTest {
     private MonitorProperties properties;
     @Autowired
     private Clock clock;
+    @Autowired
+    private MonitorSecretService monitorSecretService;
 
     private Long clientId;
 
@@ -420,5 +423,44 @@ class ApiMonitorStoreIT extends PostgresIntegrationTest {
         assertThat(notifications.count()).isEqualTo(notificationsBefore + 1);
         assertThat(latestRun(monitor.getId()).getOutcome()).isEqualTo(RunOutcome.CHANGED);
         assertThat(seenItems.findById(new SeenItemId(monitor.getId(), "k3"))).isPresent();
+    }
+
+    // ---------------------------------------------------------------- claim：secret／computed_fields（W13）
+
+    @Test
+    @DisplayName("claim：secret 已解密、computed_fields 已從 JSONB 解析成 List<ComputedField>")
+    void claim_decryptsSecretsAndParsesComputedFields() {
+        ApiMonitor monitor = saveMonitor("signed", CompareMode.WHOLE_BODY, null, null, 0, null);
+        monitorSecretService.upsert(monitor.getId(), Map.of(
+                "appsecret", "YWHZ@&mxZge1A@", "deviceid", "2b34aabc-6d14-490e-b76a-254097095055"));
+        monitor.applyUpdate(monitor.getName(), clientId, monitor.getUrl(), monitor.getMethod(),
+                monitor.getRequestBody(), monitor.getIntervalSeconds(), monitor.isEnabled(),
+                monitor.getCompareMode(), monitor.getExtractRules(), monitor.getItemPointer(),
+                monitor.getItemKeyPointer(), monitor.getMessageTemplate(), monitor.isNotifyOnFailure(),
+                monitor.getCooldownSeconds(), monitor.getMaxNotificationsPerDay(),
+                "[{\"name\":\"sign\",\"input\":\"{{secret.appsecret}}{{now.epochSeconds}}{{secret.deviceid}}\","
+                        + "\"steps\":[{\"algorithm\":\"MD5\",\"encoding\":\"HEX_UPPER\"},"
+                        + "{\"algorithm\":\"MD5\",\"encoding\":\"HEX_UPPER\"}]}]",
+                clock.instant());
+        monitors.save(monitor);
+
+        ClaimedMonitor claimed = claimOne(monitor.getId());
+
+        assertThat(claimed.secrets()).containsEntry("appsecret", "YWHZ@&mxZge1A@");
+        assertThat(claimed.secrets()).containsEntry("deviceid", "2b34aabc-6d14-490e-b76a-254097095055");
+        assertThat(claimed.computedFields()).hasSize(1);
+        assertThat(claimed.computedFields().get(0).name()).isEqualTo("sign");
+        assertThat(claimed.computedFields().get(0).steps()).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("claim：沒有設定 secret／computed_fields 的監控 → 兩者都是空")
+    void claim_noSecretsOrComputedFields_empty() {
+        ApiMonitor monitor = saveMonitor("plain", CompareMode.WHOLE_BODY, null, null, 0, null);
+
+        ClaimedMonitor claimed = claimOne(monitor.getId());
+
+        assertThat(claimed.secrets()).isEmpty();
+        assertThat(claimed.computedFields()).isEmpty();
     }
 }

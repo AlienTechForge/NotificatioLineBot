@@ -4,11 +4,16 @@ import com.jason.notifyline.monitor.MonitorProperties;
 import com.jason.notifyline.monitor.domain.ApiMonitorRepository;
 import com.jason.notifyline.monitor.domain.ApiMonitorRunRepository;
 import com.jason.notifyline.monitor.domain.CompareMode;
+import com.jason.notifyline.monitor.domain.ComputedField;
+import com.jason.notifyline.monitor.domain.ComputedStep;
+import com.jason.notifyline.monitor.domain.HashAlgorithm;
+import com.jason.notifyline.monitor.domain.HashEncoding;
 import com.jason.notifyline.monitor.fetch.DnsResolver;
 import com.jason.notifyline.monitor.fetch.OutboundUrlGuard;
 import com.jason.notifyline.support.PostgresIntegrationTest;
 import mockwebserver3.MockResponse;
 import mockwebserver3.MockWebServer;
+import mockwebserver3.RecordedRequest;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
@@ -28,7 +33,10 @@ import tools.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -181,5 +189,60 @@ class AdminMonitorTestEndpointIT extends PostgresIntegrationTest {
         assertThat(returnedBody.getBytes(StandardCharsets.UTF_8).length).isEqualTo(MAX_TEST_BODY_BYTES);
         assertThat(monitors.findAll()).isEmpty();
         assertThat(monitorRuns.findAll()).isEmpty();
+    }
+
+    // ---------------------------------------------------------------- W13：試算面板顯示計算欄位
+
+    private static String md5HexUpper(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("MD5").digest(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().withUpperCase().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * 端到端：試算面板要能顯示計算欄位的最終值（doc 13 §5、§7），且 URL 的 {@code ts}
+     * 與 header 的 {@code sign} 用同一個瞬間算出（凍結時間戳），跟
+     * {@code ApiMonitorRunnerIT.frozenTimestampAndComputedSign_endToEnd} 驗證同一件事，
+     * 只是這裡走的是試算路徑，不是排程輪詢路徑——兩條路徑都要有這個保證。
+     */
+    @Test
+    @DisplayName("試算：computedValues 帶著雙重 MD5 的結果，且與實際送出的 URL/header 自洽，回應不含 secret 值")
+    void computedFields_returnsComputedValues_consistentWithActualRequest() throws Exception {
+        String appsecret = "YWHZ@&mxZge1A@";
+        String deviceid = "2b34aabc-6d14-490e-b76a-254097095055";
+        TARGET.enqueue(jsonResponse("{\"status\":\"OK\"}"));
+
+        ComputedField signField = new ComputedField("sign",
+                "{{secret.appsecret}}{{now.epochSeconds}}{{secret.deviceid}}",
+                List.of(new ComputedStep(HashAlgorithm.MD5, HashEncoding.HEX_UPPER, null),
+                        new ComputedStep(HashAlgorithm.MD5, HashEncoding.HEX_UPPER, null)));
+        AdminDto.MonitorTestRequest req = new AdminDto.MonitorTestRequest(
+                "dry run", TARGET.url("/api").toString() + "?ts={{now.epochSeconds}}", "GET", null,
+                Map.of("sign", "{{computed.sign}}"), Map.of("appsecret", appsecret, "deviceid", deviceid),
+                CompareMode.WHOLE_BODY, List.of(), null, null, List.of(signField), "{{value.x}}", null);
+
+        String responseJson = mockMvc.perform(post("/admin/api/monitors/test")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.ok").value(true))
+                .andReturn().getResponse().getContentAsString();
+
+        RecordedRequest recorded = TARGET.takeRequest(1, TimeUnit.SECONDS);
+        assertThat(recorded).isNotNull();
+        String ts = recorded.getUrl().queryParameter("ts");
+        String expectedSign = md5HexUpper(md5HexUpper(appsecret + ts + deviceid));
+        assertThat(recorded.getHeaders().get("sign"))
+                .as("實際送出的請求：header sign 要跟 URL 的 ts 用同一個瞬間算出")
+                .isEqualTo(expectedSign);
+
+        assertThat(objectMapper.readTree(responseJson).get("data").get("computedValues").get("sign").asString())
+                .as("試算面板回傳的 computedValues.sign 要跟實際送出的一致")
+                .isEqualTo(expectedSign);
+        assertThat(responseJson).doesNotContain(appsecret).doesNotContain(deviceid);
     }
 }

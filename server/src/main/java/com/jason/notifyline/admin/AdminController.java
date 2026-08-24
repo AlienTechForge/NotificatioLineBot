@@ -196,6 +196,16 @@ public class AdminController {
     }
 
     /**
+     * 刪除單一監控 secret（不可回復）。走獨立端點，不透過
+     * {@code PUT /monitors/{id}}——見 {@link AdminDto.UpdateMonitorRequest#secrets()} 的說明。
+     */
+    @DeleteMapping("/monitors/{id}/secrets/{name}")
+    public ApiResponse<Void> deleteMonitorSecret(@PathVariable Long id, @PathVariable String name) {
+        adminService.deleteMonitorSecret(id, name);
+        return ApiResponse.ok(null);
+    }
+
+    /**
      * 匯入解析：把貼上的 cURL / {@code fetch(...)} / 自訂 JSON 解析成
      * {@link ImportedRequest}，<strong>不存檔</strong>。見
      * {@code Docs/plan/12-API監控易用性升級.md} §2.6。
