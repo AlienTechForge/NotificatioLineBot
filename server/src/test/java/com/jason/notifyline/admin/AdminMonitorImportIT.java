@@ -163,6 +163,45 @@ class AdminMonitorImportIT extends PostgresIntegrationTest {
                 .andExpect(status().isBadRequest());
     }
 
+    @Test
+    @DisplayName("URL 帶未跳脫空白等不合法字元 → 400，訊息附上出錯的字元與位置，使用者能照著改")
+    void malformedUrl_rejectedWithActionableMessage() throws Exception {
+        // 空白沒有 percent-encode，new URI(...) 會直接判定成不合法字元——藉此確認
+        // 「真的解析失敗」時，訊息不再只講「不是合法 URI」，還帶得出哪裡壞了。
+        mockMvc.perform(post("/admin/api/monitors/import")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(importBody("curl 'https://example.com/a b'")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.error.message", org.hamcrest.Matchers.containsString("index")))
+                .andExpect(jsonPath("$.error.message", org.hamcrest.Matchers.containsString("character")));
+    }
+
+    @Test
+    @DisplayName("--url 帶 curl 專屬 URL glob 跳脫（\\[ \\]）的貼上 → 解析成功，跳脫被剝掉（bug 回歸）")
+    void curlGlobEscapedUrl_importsSuccessfully() throws Exception {
+        // 跟回報的 bug 同樣的跳脫樣式與空值 header，改用 example.com 避免整合測試依賴
+        // 外部網域的 DNS 可解析性——OutboundUrlGuard 這裡一樣會真的跑一次 DNS 查詢。
+        String raw = "curl --url 'https://example.com/Shop/Order/GetList?OrderBy=CreateTime+desc"
+                + "&PageIndex=1&PageSize=30&Expressionable=\\[%7B%22FieldName%22:%22CountryId%22,"
+                + "%22FieldValue%22:%221620%22,%22ConditionalType%22:10%7D\\]' "
+                + "-H 'accept: application/json, text/plain, */*' "
+                + "-H 'sign: ' "
+                + "-H 'timestamp: 1787565614'";
+
+        mockMvc.perform(post("/admin/api/monitors/import")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(importBody(raw)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.url").value(
+                        "https://example.com/Shop/Order/GetList?OrderBy=CreateTime+desc&PageIndex=1"
+                                + "&PageSize=30&Expressionable=[%7B%22FieldName%22:%22CountryId%22,"
+                                + "%22FieldValue%22:%221620%22,%22ConditionalType%22:10%7D]"))
+                .andExpect(jsonPath("$.data.headers.sign").value(""));
+    }
+
     // ------------------------------------------------------------ 認證
 
     @Test

@@ -45,6 +45,7 @@ import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
 
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -93,6 +94,9 @@ public class AdminService {
 
     /** 匯入端點的輸入長度上限。見 {@code Docs/plan/12-API監控易用性升級.md} §2.6。 */
     private static final int IMPORT_MAX_BYTES = 64 * 1024;
+
+    /** 匯入失敗訊息回顯用的 URL 上限——夠使用者對照剛貼的內容，又不會把整段離譜長的字串塞進回應。 */
+    private static final int IMPORT_URL_ECHO_MAX_LENGTH = 200;
 
     private final ClientRepository clients;
     private final ClientService clientService;
@@ -613,9 +617,19 @@ public class AdminService {
 
         URI uri;
         try {
-            uri = URI.create(imported.url());
-        } catch (IllegalArgumentException e) {
-            throw new ApiException(ErrorCode.VALIDATION_ERROR, "Parsed URL is not a valid URI.");
+            // 用 new URI(String) 而不是 URI.create(String)：後者把 URISyntaxException
+            // 包成 IllegalArgumentException，getIndex()/getReason() 這些對使用者有用
+            // 的細節就丟了。前者是 checked exception，細節留著，讓下面能組出「哪個
+            // 字元、第幾個位置」這種可以照著改的錯誤訊息，而不是只講「不合法」。
+            uri = new URI(imported.url());
+        } catch (URISyntaxException e) {
+            // 對外訊息回顯 imported.url()：那是使用者自己剛貼上的內容，回顯給他本人
+            // 不算外洩。但這個訊息不能直接被 GlobalExceptionHandler 拿去記錄——URL
+            // 常帶 token/sign 這類查詢字串——所以用第三個參數另外給一版不含 URL 內容、
+            // 可以安全寫進日誌的版本（見 ApiException 的說明）。
+            throw new ApiException(ErrorCode.VALIDATION_ERROR,
+                    describeInvalidImportUri(imported.url(), e),
+                    "Parsed URL is not a valid URI.");
         }
         try {
             outboundUrlGuard.check(uri);
@@ -638,6 +652,33 @@ public class AdminService {
         siteSessionService.importCookies(host, cookieHeader.get());
         Map<String, String> headersWithoutCookie = CookieCodec.withoutHeaderIgnoreCase(imported.headers(), "cookie");
         return new ImportedRequest(imported.url(), imported.method(), headersWithoutCookie, imported.body());
+    }
+
+    /**
+     * 把 {@link URISyntaxException} 組成「哪個字元、第幾個位置出問題」的訊息，附上
+     * （必要時截短的）URL 本身，讓使用者照著改。<strong>只給
+     * {@link #importMonitorRequest} 用</strong>——呼叫端必須把回傳值放進
+     * {@link ApiException} 的對外訊息，並另外用它的三參數建構子提供一版不含 URL 的
+     * 記錄用訊息，見那裡的說明。
+     */
+    private static String describeInvalidImportUri(String url, URISyntaxException e) {
+        StringBuilder detail = new StringBuilder("Parsed URL is not a valid URI: ").append(e.getReason());
+        int index = e.getIndex();
+        if (index >= 0) {
+            detail.append(" (index ").append(index);
+            if (index < url.length()) {
+                detail.append(", character '").append(url.charAt(index)).append('\'');
+            }
+            detail.append(')');
+        }
+        detail.append(". URL: ").append(abbreviateForMessage(url));
+        return detail.toString();
+    }
+
+    private static String abbreviateForMessage(String value) {
+        return value.length() <= IMPORT_URL_ECHO_MAX_LENGTH
+                ? value
+                : value.substring(0, IMPORT_URL_ECHO_MAX_LENGTH) + "…(truncated)";
     }
 
     /** 單一監控最近 50 筆執行紀錄，最新在前。 */

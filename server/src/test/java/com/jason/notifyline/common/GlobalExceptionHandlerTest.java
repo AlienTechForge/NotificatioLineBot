@@ -3,6 +3,7 @@ package com.jason.notifyline.common;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -12,6 +13,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * {@link GlobalExceptionHandler#handleUnreadable} 的機密洩漏修補（Wave 5 review 帶過來
@@ -105,5 +108,48 @@ class GlobalExceptionHandlerTest {
 
         assertThat(logAppender.list).hasSize(1);
         assertThat(logAppender.list.get(0).getFormattedMessage()).contains("no message");
+    }
+
+    // ------------------------------------------------------------ handleApiException：
+    // ApiException 的 logMessage/message 分離（見 ApiException 的說明——匯入監控失敗時
+    // 對外訊息會回顯使用者剛貼上的 URL，那份訊息不可以直接被這裡的 log.warn 寫進日誌）
+
+    @Test
+    @DisplayName("ApiException 帶不同的記錄用訊息時：對外回應保留完整訊息，記錄改用記錄用版本")
+    void apiException_withDistinctLogMessage_logsRedactedVersionOnly() {
+        String secretUrl = "https://example.com/callback?token=super-secret-token-abc&sign=xyz";
+        String publicMessage = "Parsed URL is not a valid URI: Illegal character in query at index 40. URL: "
+                + secretUrl;
+        ApiException exception = new ApiException(ErrorCode.VALIDATION_ERROR, publicMessage,
+                "Parsed URL is not a valid URI.");
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getRequestURI()).thenReturn("/admin/api/monitors/import");
+
+        ResponseEntity<ApiResponse<Void>> response = handler.handleApiException(exception, request);
+
+        // 對外回應：使用者看得到完整訊息，含剛貼上的 URL——那是他自己貼的內容。
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().error().message()).isEqualTo(publicMessage);
+
+        // 記錄：不可以出現 URL 或裡面的機密，只留下一般化的原因。
+        assertThat(logAppender.list).hasSize(1);
+        String logged = logAppender.list.get(0).getFormattedMessage();
+        assertThat(logged)
+                .doesNotContain(secretUrl)
+                .doesNotContain("super-secret-token-abc")
+                .contains("Parsed URL is not a valid URI.");
+    }
+
+    @Test
+    @DisplayName("ApiException 沒有另外指定記錄用訊息時：記錄跟對外訊息相同（既有行為不變）")
+    void apiException_withoutDistinctLogMessage_logsSameAsPublicMessage() {
+        ApiException exception = new ApiException(ErrorCode.NOT_FOUND, "Monitor not found.");
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getRequestURI()).thenReturn("/admin/api/monitors/1");
+
+        handler.handleApiException(exception, request);
+
+        assertThat(logAppender.list).hasSize(1);
+        assertThat(logAppender.list.get(0).getFormattedMessage()).contains("Monitor not found.");
     }
 }
