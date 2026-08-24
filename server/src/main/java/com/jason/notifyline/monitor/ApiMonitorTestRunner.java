@@ -9,6 +9,9 @@ import com.jason.notifyline.monitor.fetch.OutboundUrlGuard;
 import com.jason.notifyline.monitor.parse.ChangeDetector;
 import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
+import com.jason.notifyline.monitor.session.SiteSessionService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
@@ -46,24 +49,44 @@ import java.util.Set;
  * <p>這裡完全沒有注入 {@code NotificationService} 或 {@code ApiMonitorStore}——不是刻意
  * 「不呼叫」，而是連可以呼叫的依賴都不存在，杜絕日後不小心加一行 {@code submit(...)}
  * 就讓試跑變成真的發送。
+ *
+ * <h2>會附加 cookie jar，但絕不合併回寫</h2>
+ *
+ * <p>立即測試存在的唯一理由是預覽排程輪詢（{@link ApiMonitorRunner}）實際會打出去的
+ * 請求——如果這裡不附加 {@link SiteSessionService} 存的登入狀態，一個對排程來說會成功
+ * 的監控在試跑時會回 401，使用者會誤以為設定壞了。所以這裡注入同一顆
+ * {@link SiteSessionService}，抓取前呼叫 {@link SiteSessionService#attachCookies}，
+ * 跟 {@link ApiMonitorRunner#execute} 完全同一段邏輯。
+ *
+ * <p>但<strong>只呼叫附加，絕不呼叫 {@link SiteSessionService#mergeSetCookies}</strong>：
+ * 試跑是「預覽」，不是「執行」，不能有任何副作用——道理跟上面「絕不送出任何通知」
+ * 完全一樣，只是這次要防的不是發送，而是「點一次立即測試就把排程輪詢依賴的登入
+ * session 換掉」。若目標端點在試跑當下剛好回一組新的 {@code Set-Cookie}（例如輪換
+ * CSRF token），這裡就讓它被丟棄，不去動 jar；下一次排程輪詢仍然用同一份儲存的
+ * 登入狀態，行為可預期。
  */
 @Service
 public class ApiMonitorTestRunner {
+
+    private static final Logger log = LoggerFactory.getLogger(ApiMonitorTestRunner.class);
 
     /** NEW_ITEMS 模式一則訊息最多列這麼多筆，其餘寫「還有 N 筆」——規則同 {@code ApiMonitorRunner}。 */
     private static final int MAX_ITEMS_PER_MESSAGE = 20;
 
     private final OutboundUrlGuard guard;
     private final ApiFetcher fetcher;
+    private final SiteSessionService siteSessionService;
     private final ChangeDetector changeDetector;
     private final MessageTemplate messageTemplate;
 
     public ApiMonitorTestRunner(OutboundUrlGuard guard,
                                 ApiFetcher fetcher,
+                                SiteSessionService siteSessionService,
                                 ChangeDetector changeDetector,
                                 MessageTemplate messageTemplate) {
         this.guard = guard;
         this.fetcher = fetcher;
+        this.siteSessionService = siteSessionService;
         this.changeDetector = changeDetector;
         this.messageTemplate = messageTemplate;
     }
@@ -75,8 +98,19 @@ public class ApiMonitorTestRunner {
             return new MonitorTestOutcome.Blocked(e.getMessage());
         }
 
+        // 抓取前：附加 jar cookie，理由見類別註解「會附加 cookie jar，但絕不合併回寫」。
+        // decrypt/DB 若意外失敗，寧可當成「這次沒有登入狀態可用」繼續往下打，也不要讓
+        // 一筆壞掉的 jar 擋住整次試跑——跟 ApiMonitorRunner.execute 的同一段邏輯一致。
+        Map<String, String> headersWithCookies;
+        try {
+            headersWithCookies = siteSessionService.attachCookies(config.uri().getHost(), config.headers());
+        } catch (RuntimeException e) {
+            log.warn("附加 cookie jar 失敗，本次試跑不使用既有登入狀態：host={}", config.uri().getHost(), e);
+            headersWithCookies = config.headers();
+        }
+
         FetchResult fetchResult = fetcher.fetch(new ApiFetcher.FetchRequest(
-                config.uri(), config.method(), config.requestBody(), config.headers()));
+                config.uri(), config.method(), config.requestBody(), headersWithCookies));
         if (fetchResult instanceof FetchResult.Failure failure) {
             return new MonitorTestOutcome.FetchFailed(
                     failure.reason().name(), failure.detail(), failure.httpStatus());
