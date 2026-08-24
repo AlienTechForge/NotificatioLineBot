@@ -59,7 +59,7 @@
 
     // --------------------------------------------------------------- 狀態
 
-    const state = { clients: [], users: [], monitors: [], loaded: {} };
+    const state = { clients: [], users: [], monitors: [], sessions: [], loaded: {} };
 
     // --------------------------------------------------------------- 提示
 
@@ -101,6 +101,7 @@
         history: { title: '發送紀錄', sub: '最新 100 筆', load: loadHistory },
         users: { title: '使用者', sub: '管理 owner 標記', load: loadUsers },
         monitors: { title: '監控', sub: '定時打 API、有變更才通知', load: loadMonitors },
+        sessions: { title: '登入狀態', sub: '依 host 共用的 cookie jar', load: loadSessions },
     };
 
     let current = 'dashboard';
@@ -663,6 +664,73 @@
         } catch (e) { toast(e.message, true); }
     }
 
+    // ---- 匯入（貼上 cURL / fetch / 自訂 JSON） ----
+
+    /** 給使用者拿去餵 AI 的自訂 JSON schema，逐字對應 Docs/plan/12-API監控易用性升級.md §2.4。 */
+    const MONITOR_IMPORT_SCHEMA = '{\n'
+        + '  "version": 1,\n'
+        + '  "name": "範例監控",\n'
+        + '  "request": {\n'
+        + '    "url": "https://example.com/api/orders?since={{now-1h.iso8601}}",\n'
+        + '    "method": "GET",\n'
+        + '    "headers": { "accept": "application/json" },\n'
+        + '    "body": null\n'
+        + '  },\n'
+        + '  "intervalSeconds": 300,\n'
+        + '  "compare": {\n'
+        + '    "mode": "NEW_ITEMS",\n'
+        + '    "itemPointer": "/data/orders",\n'
+        + '    "itemKeyPointer": "/id",\n'
+        + '    "rules": [{ "name": "amount", "pointer": "/amount" }]\n'
+        + '  },\n'
+        + '  "messageTemplate": "新訂單 {{item.amount}} 元"\n'
+        + '}';
+
+    function clearImportState() {
+        $('monImportRaw').value = '';
+        $('monImportError').hidden = true;
+    }
+
+    function showImportError(message) {
+        const box = $('monImportError');
+        box.textContent = message;
+        box.hidden = false;
+    }
+
+    /** 把 /monitors/import 的回應（url/method/headers/body）套進表單。不動名稱、比對模式等填表欄位。 */
+    function applyImportedRequest(result) {
+        $('monUrl').value = result.url || '';
+        $('monMethod').value = result.method || 'GET';
+        $('monBody').value = result.body || '';
+        const headerKeys = Object.keys(result.headers || {});
+        $('monHeaders').value = headerKeys.length ? JSON.stringify(result.headers, null, 2) : '';
+        syncMonitorMethod();
+    }
+
+    async function importMonitorRaw() {
+        const raw = $('monImportRaw').value;
+        if (!raw.trim()) { showImportError('請先貼上內容。'); return; }
+        $('monImportError').hidden = true;
+
+        const btn = $('monImportBtn');
+        btn.disabled = true; btn.textContent = '解析中…';
+        try {
+            const result = await call('/monitors/import', { method: 'POST', body: JSON.stringify({ raw }) });
+            applyImportedRequest(result);
+            // 貼上框內容含 cookie／token，帶入表單後盡快從畫面上清掉，不留在 DOM 裡。
+            $('monImportRaw').value = '';
+            toast('已解析並帶入下面的欄位');
+        } catch (e) {
+            showImportError(e.message);
+        } finally { btn.disabled = false; btn.textContent = '解析並帶入'; }
+    }
+
+    function copyImportSchema() {
+        navigator.clipboard.writeText(MONITOR_IMPORT_SCHEMA).then(
+            () => toast('已複製 JSON 格式'),
+            () => toast('複製失敗，請手動選取', true));
+    }
+
     // ---- 新增/編輯抽屜 ----
 
     let editingMonitor = null; // null = 新增模式
@@ -672,6 +740,7 @@
         $('monitorTitle').textContent = '新增監控';
         $('monitorError').hidden = true;
         $('monitorForm').reset();
+        clearImportState();
         fillClientSelect($('monClient'));
         $('monInterval').value = 60;
         $('monCompareMode').value = 'WHOLE_BODY';
@@ -689,6 +758,7 @@
         editingMonitor = m;
         $('monitorTitle').textContent = '編輯監控：' + m.name;
         $('monitorError').hidden = true;
+        clearImportState();
         $('monName').value = m.name;
         fillClientSelect($('monClient'));
         $('monClient').value = m.clientId;
@@ -732,6 +802,9 @@
         const box = $('monTestResult');
         box.hidden = true;
         box.replaceChildren();
+        $('monRetestBtn').hidden = true;
+        lastMonitorTest = null;
+        resetFieldVolatility();
     }
 
     // ---- 抽取欄位（extractRules）編輯 ----
@@ -829,17 +902,65 @@
 
     // ---- 立即測試：關鍵 UX，沒有它設 JsonPointer 等於盲猜 ----
 
-    async function testMonitorNow() {
-        let form;
-        try {
-            form = collectMonitorForm();
-        } catch (e) {
-            showMonitorFormError('自訂 header 不是合法的 JSON：' + e.message);
-            return;
+    /** 上一次成功的試跑結果 { result, compareMode }，供「再抓一次比對」當基準；null = 還沒測試過。 */
+    let lastMonitorTest = null;
+    /** 欄位「易變動」追蹤：key -> { changed, total }。key 是欄位名，NEW_ITEMS 模式下是 itemKey::name。 */
+    let fieldVolatility = new Map();
+
+    function resetFieldVolatility() {
+        fieldVolatility = new Map();
+    }
+
+    function bumpVolatility(key, didChange) {
+        const v = fieldVolatility.get(key) || { changed: 0, total: 0 };
+        v.total += 1;
+        if (didChange) v.changed += 1;
+        fieldVolatility.set(key, v);
+        return v;
+    }
+
+    /** 每次都變＝連續比對至少兩次、每次都不一樣——只變過一次不算，避免把「剛好變了一次」誤判成雜訊欄位。 */
+    function isAlwaysChanging(v) {
+        return v.total >= 2 && v.changed === v.total;
+    }
+
+    /** 比較兩次試跑結果，回傳 { changed:Set, volatile:Set, itemLevel }。只比對「兩次都有」的欄位／項目。 */
+    function computeTestDiff(prevResult, nextResult, compareMode) {
+        const changed = new Set();
+        const volatile = new Set();
+        if (compareMode === 'NEW_ITEMS') {
+            const prevByKey = new Map((prevResult.items || []).map((i) => [i.itemKey, i.fields || {}]));
+            (nextResult.items || []).forEach((item) => {
+                const prevFields = prevByKey.get(item.itemKey);
+                if (!prevFields) return; // 只在兩次都出現的項目上比對欄位有沒有變
+                Object.keys(item.fields || {}).forEach((name) => {
+                    const key = item.itemKey + '::' + name;
+                    const didChange = prevFields[name] !== item.fields[name];
+                    const v = bumpVolatility(key, didChange);
+                    if (didChange) {
+                        changed.add(key);
+                        if (isAlwaysChanging(v)) volatile.add(key);
+                    }
+                });
+            });
+            return { changed, volatile, itemLevel: true };
         }
-        // /monitors/test 不吃 clientId/interval/enabled 等排程/發送欄位——試跑不建立
-        // 排程、不綁定 client、更不會發送，只帶抓取＋解析＋渲染需要的部分。
-        const body = {
+        const prevValues = prevResult.values || {};
+        const nextValues = nextResult.values || {};
+        new Set([...Object.keys(prevValues), ...Object.keys(nextValues)]).forEach((name) => {
+            const didChange = prevValues[name] !== nextValues[name];
+            const v = bumpVolatility(name, didChange);
+            if (didChange) {
+                changed.add(name);
+                if (isAlwaysChanging(v)) volatile.add(name);
+            }
+        });
+        return { changed, volatile, itemLevel: false };
+    }
+
+    /** /monitors/test 不吃 clientId/interval/enabled 等排程/發送欄位——試跑不建立排程、不綁定 client、更不會發送，只帶抓取＋解析＋渲染需要的部分。 */
+    function monitorTestBody(form) {
+        return {
             name: form.name || null,
             url: form.url,
             method: form.method,
@@ -851,21 +972,63 @@
             itemKeyPointer: form.itemKeyPointer,
             messageTemplate: form.messageTemplate,
         };
+    }
+
+    async function testMonitorNow() {
+        let form;
+        try {
+            form = collectMonitorForm();
+        } catch (e) {
+            showMonitorFormError('自訂 header 不是合法的 JSON：' + e.message);
+            return;
+        }
+        const body = monitorTestBody(form);
 
         const btn = $('monTestBtn');
         btn.disabled = true; btn.textContent = '測試中…';
+        $('monRetestBtn').hidden = true;
         const box = $('monTestResult');
         box.hidden = false;
         box.replaceChildren(el('div', 'loading', '測試中…'));
         try {
             const result = await call('/monitors/test', { method: 'POST', body: JSON.stringify(body) });
-            renderMonitorTestResult(result);
+            resetFieldVolatility();
+            lastMonitorTest = result.ok ? { result, compareMode: form.compareMode } : null;
+            renderMonitorTestResult(result, form.compareMode, null);
         } catch (e) {
             box.replaceChildren(el('div', 'notice notice--error', e.message));
         } finally { btn.disabled = false; btn.textContent = '立即測試'; }
     }
 
-    function renderMonitorTestResult(result) {
+    /** 「再抓一次」：跟上一次成功結果比對，標出變動欄位——設定監控最花時間的一步，見 doc 12 §4.3。 */
+    async function retestMonitorNow() {
+        if (!lastMonitorTest) return;
+        let form;
+        try {
+            form = collectMonitorForm();
+        } catch (e) {
+            showMonitorFormError('自訂 header 不是合法的 JSON：' + e.message);
+            return;
+        }
+        const body = monitorTestBody(form);
+
+        const btn = $('monRetestBtn');
+        btn.disabled = true; btn.textContent = '再抓取中…';
+        try {
+            const result = await call('/monitors/test', { method: 'POST', body: JSON.stringify(body) });
+            let diffInfo = null;
+            if (result.ok) {
+                diffInfo = computeTestDiff(lastMonitorTest.result, result, form.compareMode);
+                lastMonitorTest = { result, compareMode: form.compareMode };
+            }
+            renderMonitorTestResult(result, form.compareMode, diffInfo);
+            if (result.ok) toast('已再抓一次並比對');
+        } catch (e) {
+            toast(e.message, true);
+        } finally { btn.disabled = false; btn.textContent = '再抓一次比對'; }
+    }
+
+    function renderMonitorTestResult(result, compareMode, diffInfo) {
         const box = $('monTestResult');
         box.replaceChildren();
 
@@ -874,6 +1037,7 @@
                 + (result.httpStatus ? `（HTTP ${result.httpStatus}）` : '')
                 + `：${result.failureDetail || ''}`;
             box.append(el('div', 'notice notice--error', detail));
+            $('monRetestBtn').hidden = !lastMonitorTest;
             return;
         }
 
@@ -884,8 +1048,7 @@
         if (valueKeys.length) {
             box.append(el('p', 'fieldset-label', '抽取到的值'));
             const list = el('ul', 'tag-set');
-            valueKeys.forEach((k) => list.append(
-                el('li', 'scope', `${k} = ${result.values[k] == null ? '—' : result.values[k]}`)));
+            valueKeys.forEach((k) => list.append(valueChip(k, result.values[k], diffInfo, k)));
             box.append(list);
         }
 
@@ -899,9 +1062,17 @@
             result.items.slice(0, 5).forEach((item) => {
                 const tr = el('tr');
                 tr.append(tdMono(item.itemKey));
+                const fieldsTd = el('td');
                 const fieldKeys = Object.keys(item.fields || {});
-                const text = fieldKeys.map((k) => `${k}=${item.fields[k]}`).join(', ');
-                tr.append(td(text || '—'));
+                if (fieldKeys.length) {
+                    const list = el('ul', 'tag-set');
+                    fieldKeys.forEach((k) => list.append(
+                        valueChip(k, item.fields[k], diffInfo, item.itemKey + '::' + k)));
+                    fieldsTd.append(list);
+                } else {
+                    fieldsTd.textContent = '—';
+                }
+                tr.append(fieldsTd);
                 tb.append(tr);
             });
             table.append(tb);
@@ -909,10 +1080,164 @@
             box.append(wrap);
         }
 
+        box.append(el('p', 'fieldset-label', '欄位展開（點「插入」加入上面的抽取欄位）'));
+        box.append(el('p', 'hint',
+            '只有值恰好是物件或陣列的已設定欄位能往下展開——先手動填一個大概的 pointer 測試看看，'
+            + '抓到容器後再從這裡精準挑選子欄位，插入的 pointer 一定正確（是從解析出來的 JSON 直接算出來的，不是用猜的）。'));
+        box.append(buildFieldOverview(result, compareMode));
+
         box.append(el('p', 'fieldset-label', '渲染後的訊息'));
         const pre = el('pre', 'test-message');
         pre.textContent = result.renderedMessage || '（空）';
         box.append(pre);
+
+        $('monRetestBtn').hidden = false;
+    }
+
+    /** name=value 的 chip，diffInfo 非空時附加「有變動」／「每次都變」標記，見 doc 12 §4.3。 */
+    function valueChip(name, value, diffInfo, diffKey) {
+        const li = el('li', 'diff-chip');
+        li.append(el('span', 'scope', `${name} = ${value == null ? '—' : value}`));
+        if (diffInfo && diffInfo.changed.has(diffKey)) {
+            const isVolatile = diffInfo.volatile.has(diffKey);
+            li.append(el('span', 'tag ' + (isVolatile ? 'tag--danger' : 'tag--warning'),
+                isVolatile ? '每次都變·不建議監控' : '有變動'));
+        }
+        return li;
+    }
+
+    // ---- 欄位展開／插入 pointer（取代手打 JsonPointer，見 doc 12 §4.2） ----
+    //
+    // 試跑回應刻意不含目標 API 的原始 body（AdminDto.MonitorTestResult 的類別註解：
+    // 「絕不含目標 API 的原始回應內容」），所以這裡只能在「已設定的欄位值恰好是物件/陣列」
+    // 時才能往下展開——用該欄位既有的 pointer 當基準往下拼接子路徑。這樣算出來的 pointer
+    // 保證正確：子節點是從同一段已經被後端解析出來的 JSON 反查出來的，不是用字串猜的。
+    // 完全空白（還沒有任何抽取欄位）時沒有東西可以展開，使用者要先手動打一個起點 pointer。
+
+    function buildFieldOverview(result, compareMode) {
+        const wrap = el('div', 'json-tree');
+        const rulesByName = new Map(collectRuleRows().map((r) => [r.name, r.pointer]));
+
+        if (compareMode === 'NEW_ITEMS') {
+            (result.items || []).slice(0, 5).forEach((item) => {
+                const box = containerFieldsTree(item.fields || {}, rulesByName);
+                if (!box) return;
+                const itemWrap = el('div', 'json-tree__item');
+                itemWrap.append(el('p', 'hint', `項目 ${item.itemKey}`));
+                itemWrap.append(box);
+                wrap.append(itemWrap);
+            });
+        } else {
+            const box = containerFieldsTree(result.values || {}, rulesByName);
+            if (box) wrap.append(box);
+        }
+
+        if (!wrap.childElementCount) {
+            wrap.append(el('p', 'hint', '目前沒有欄位可以展開（還沒設定抽取欄位，或抓到的值都是純量）。'));
+        }
+        return wrap;
+    }
+
+    /** 把 valuesMap 裡「值是合法 JSON 物件/陣列」的項目各自轉成一棵可展開的樹；沒有任何一個符合時回傳 null。 */
+    function containerFieldsTree(valuesMap, rulesByName) {
+        const box = el('div');
+        let any = false;
+        Object.keys(valuesMap).forEach((name) => {
+            const parsed = tryParseJsonContainer(valuesMap[name]);
+            if (parsed === null) return;
+            any = true;
+            const basePointer = rulesByName.get(name) || '';
+            const details = document.createElement('details');
+            details.className = 'json-tree__node';
+            const summary = document.createElement('summary');
+            summary.textContent = `${name}（${containerLabel(parsed)}）`;
+            details.append(summary);
+            const children = el('div', 'json-tree__children');
+            appendTreeChildren(children, parsed, '', basePointer);
+            details.append(children);
+            box.append(details);
+        });
+        return any ? box : null;
+    }
+
+    function containerLabel(node) {
+        return Array.isArray(node) ? `陣列 · ${node.length} 筆` : `物件 · ${Object.keys(node).length} 個欄位`;
+    }
+
+    function appendTreeChildren(container, node, pointerSuffix, basePointer) {
+        const entries = Array.isArray(node) ? node.map((v, i) => [String(i), v]) : Object.entries(node);
+        entries.forEach(([key, value]) => {
+            const childSuffix = pointerSuffix + '/' + escapePointerSegment(key);
+            if (value !== null && typeof value === 'object') {
+                const details = document.createElement('details');
+                details.className = 'json-tree__node';
+                const summary = document.createElement('summary');
+                summary.append(el('span', null, `${key}（${containerLabel(value)}）`));
+                summary.append(pointerPickBtn(basePointer, childSuffix));
+                details.append(summary);
+                const children = el('div', 'json-tree__children');
+                appendTreeChildren(children, value, childSuffix, basePointer);
+                details.append(children);
+                container.append(details);
+            } else {
+                const row = el('div', 'json-tree__leaf');
+                row.append(el('span', 'json-tree__key', key));
+                row.append(el('span', 'json-tree__value', formatLeafValue(value)));
+                row.append(pointerPickBtn(basePointer, childSuffix));
+                container.append(row);
+            }
+        });
+    }
+
+    function pointerPickBtn(basePointer, pointerSuffix) {
+        const btn = el('button', 'btn btn--sm btn--ghost json-tree__pick', '插入');
+        btn.type = 'button';
+        btn.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation(); // 別讓點擊冒泡到 <summary>，變成順便展開/收合節點
+            insertPointerAsRule(basePointer + pointerSuffix, pointerSuffix);
+        });
+        return btn;
+    }
+
+    function insertPointerAsRule(fullPointer, pointerSuffix) {
+        const name = sanitizeRuleName(lastPointerSegment(pointerSuffix));
+        addRuleRow(name, fullPointer);
+        toast(`已插入欄位「${name}」：${fullPointer}`);
+    }
+
+    function tryParseJsonContainer(raw) {
+        if (typeof raw !== 'string') return null;
+        const trimmed = raw.trim();
+        if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) return null;
+        try {
+            const parsed = JSON.parse(trimmed);
+            return parsed !== null && typeof parsed === 'object' ? parsed : null;
+        } catch (e) { return null; }
+    }
+
+    function formatLeafValue(value) {
+        if (value === null) return '—';
+        return typeof value === 'string' ? value : JSON.stringify(value);
+    }
+
+    function escapePointerSegment(seg) {
+        return seg.replace(/~/g, '~0').replace(/\//g, '~1');
+    }
+
+    function unescapePointerSegment(seg) {
+        return seg.replace(/~1/g, '/').replace(/~0/g, '~');
+    }
+
+    function lastPointerSegment(pointerSuffix) {
+        if (!pointerSuffix) return 'field';
+        const idx = pointerSuffix.lastIndexOf('/');
+        return unescapePointerSegment(pointerSuffix.slice(idx + 1));
+    }
+
+    /** 後端要求規則名稱是 [A-Za-z0-9_]{1,32}，把 pointer 最後一段轉成合法名稱（可再手動編輯）。 */
+    function sanitizeRuleName(raw) {
+        const cleaned = (raw || '').replace(/[^A-Za-z0-9_]/g, '_').slice(0, 32);
+        return cleaned || 'field';
     }
 
     // ---- 執行紀錄 ----
@@ -956,6 +1281,56 @@
         table.append(tb);
         const wrap = el('div', 'table-wrap'); wrap.append(table);
         body.append(wrap);
+    }
+
+    // ============================================================ 登入狀態
+
+    async function loadSessions() {
+        try {
+            state.sessions = await call('/sessions');
+            renderSessions();
+        } catch (e) { pageError('載入失敗：' + e.message); }
+    }
+
+    function renderSessions() {
+        const body = $('sessionRows');
+        body.replaceChildren(...state.sessions.map(sessionRow));
+        $('sessionsEmpty').hidden = state.sessions.length !== 0;
+    }
+
+    function sessionRow(s) {
+        const tr = el('tr');
+        tr.append(tdMono(s.host));
+
+        const namesTd = el('td');
+        if (s.cookieNames && s.cookieNames.length) {
+            const list = el('ul', 'tag-set');
+            s.cookieNames.forEach((n) => list.append(el('li', 'scope', n)));
+            namesTd.append(list);
+        } else {
+            namesTd.append(el('span', 'tag tag--muted', '無'));
+        }
+        tr.append(namesTd);
+
+        tr.append(tdNum(s.cookieCount));
+        tr.append(td(fmtTime(s.lastRefreshedAt)));
+        tr.append(td(fmtTime(s.createdAt)));
+
+        const act = el('td');
+        const wrap = el('div', 'row-actions');
+        wrap.append(iconBtn('清除', () => clearSession(s), 'btn--danger'));
+        act.append(wrap);
+        tr.append(act);
+        return tr;
+    }
+
+    async function clearSession(s) {
+        if (!confirm(`清除 ${s.host} 的登入狀態？之後這個 host 底下的監控會開始 401，要重新貼一次含 cookie 的請求才會復活。`)) return;
+        try {
+            await call('/sessions/' + encodeURIComponent(s.host), { method: 'DELETE' });
+            toast(`已清除 ${s.host}`);
+            await loadSessions();
+        } catch (e) { toast(e.message, true); }
     }
 
     // ------------------------------------------------------------ 小工具
@@ -1039,12 +1414,15 @@
     $('detailClose').addEventListener('click', () => $('detailDialog').close());
 
     $('newMonitorBtn').addEventListener('click', openMonitorCreate);
+    $('monImportBtn').addEventListener('click', importMonitorRaw);
+    $('monCopySchemaBtn').addEventListener('click', copyImportSchema);
     $('monAddRule').addEventListener('click', () => addRuleRow('', ''));
     $('monMethod').addEventListener('change', syncMonitorMethod);
     $('monCompareMode').addEventListener('change', syncMonitorCompareMode);
     $('monitorForm').addEventListener('submit', submitMonitor);
     $('monitorCancel').addEventListener('click', () => $('monitorDialog').close());
     $('monTestBtn').addEventListener('click', testMonitorNow);
+    $('monRetestBtn').addEventListener('click', retestMonitorNow);
     $('monitorRunsClose').addEventListener('click', () => $('monitorRunsDialog').close());
 
     $('logoutForm').addEventListener('submit', (e) => {
