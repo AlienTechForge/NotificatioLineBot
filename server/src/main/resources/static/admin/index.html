@@ -482,7 +482,48 @@
             <div class="field">
                 <label for="monTemplate">訊息模板</label>
                 <textarea id="monTemplate" required placeholder="監控「{{monitor.name}}」狀態變成 {{value.status}}（原本 {{old.status}}）"></textarea>
-                <p class="hint">可用 <code>{{value.NAME}}</code> <code>{{old.NAME}}</code> <code>{{item.NAME}}</code> <code>{{monitor.name}}</code> <code>{{now}}</code>。</p>
+                <p class="hint">輸入 <code>{{</code> 會跳出可用變數清單（<code>Ctrl+Space</code> 手動叫出），依打字內容即時過濾。</p>
+                <details class="var-ref">
+                    <summary>完整變數對照表</summary>
+                    <div class="var-ref__section">
+                        <p class="var-ref__title">訊息模板（monTemplate）</p>
+                        <div class="table-wrap">
+                            <table class="grid">
+                                <thead><tr><th>變數</th><th>意義</th><th>何時有值</th></tr></thead>
+                                <tbody>
+                                    <tr><td><code>{{value.欄位}}</code></td><td>本次抓到的值</td><td>一律</td></tr>
+                                    <tr><td><code>{{old.欄位}}</code></td><td>上一次的值</td><td>僅正式通知。試算一律 —</td></tr>
+                                    <tr><td><code>{{item.欄位}}</code></td><td>該筆新項目的欄位</td><td>僅 NEW_ITEMS 模式，逐筆渲染時</td></tr>
+                                    <tr><td><code>{{monitor.name}}</code></td><td>監控名稱</td><td>一律</td></tr>
+                                    <tr><td><code>{{now}}</code></td><td>現在時間 MM/dd HH:mm（台北）</td><td>一律</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <p class="hint">打錯 → —（不原樣輸出）；值為 null → —；渲染後截到 4500 字；<code>NEW_ITEMS</code> 每筆各渲染一次，最多 20 筆。</p>
+                    </div>
+                    <div class="var-ref__section">
+                        <p class="var-ref__title">請求模板（monUrl／monHeaders／monBody）</p>
+                        <div class="table-wrap">
+                            <table class="grid">
+                                <thead><tr><th>變數</th><th>產出</th></tr></thead>
+                                <tbody>
+                                    <tr><td><code>{{now.epochSeconds}}</code></td><td>Unix 秒</td></tr>
+                                    <tr><td><code>{{now.epochMillis}}</code></td><td>Unix 毫秒</td></tr>
+                                    <tr><td><code>{{now.iso8601}}</code></td><td>2026-08-24T03:00:00Z（UTC，秒精度）</td></tr>
+                                    <tr><td><code>{{now.format:PATTERN}}</code></td><td>自訂格式，台北時區</td></tr>
+                                    <tr><td><code>{{now±N[smhd].…}}</code></td><td>位移，例如 <code>{{now-7d.format:yyyy-MM-dd}}</code></td></tr>
+                                    <tr><td><code>{{uuid}}</code></td><td>隨機 UUID（同一次請求內同值）</td></tr>
+                                    <tr><td><code>{{computed.名稱}}</code></td><td>計算欄位</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <p class="hint">與訊息模板刻意相反：請求模板打錯佔位符會在<strong>存檔時直接擋（400）</strong>。</p>
+                    </div>
+                    <div class="var-ref__section">
+                        <p class="var-ref__title">計算欄位的「輸入」</p>
+                        <p class="hint">請求模板全部變數，外加 <code>{{secret.名稱}}</code>。<code>{{secret.*}}</code> 只能寫在這裡，不能出現在 URL／header／body。</p>
+                    </div>
+                </details>
             </div>
 
             <div class="form-row">
@@ -528,6 +569,7 @@
             <button type="submit" class="btn btn--primary" id="monitorSave">儲存</button>
         </div>
     </form>
+    <div id="varMenu" class="var-menu" role="listbox" aria-label="可用變數" hidden></div>
 </dialog>
 
 <!-- 監控執行紀錄 -->
