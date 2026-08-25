@@ -1240,8 +1240,29 @@
         };
     }
 
-    /** 選單開著時使用者捲動了外層的 dialog__body：位置會失準，直接關掉比硬追蹤更穩妥。 */
-    function autoMenuScrollHandler() { closeAutoMenu(); }
+    /** 選單開著時任何捲動事件的統一處理（捲動事件不冒泡，靠掛在 document 上的 capture
+     *  監聽器才能收到任何後代元素的捲動——見下方註冊處）。三種情況：
+     *  1. 捲動源頭在選單自己身上（它自己就有 max-height + overflow-y:auto）：放行給瀏覽器
+     *     原生處理，不關閉也不重新定位，否則選單長度一超過可視範圍就永遠捲不動。
+     *  2. 捲動源頭是外層的 .dialog__body：位置會失準，但游標本身沒動，追上去比關掉更好，
+     *     直接呼叫既有的 positionAutoMenu() 重新換算一次。
+     *  3. 錨定的輸入框本身已經被捲出 .dialog__body 的可視範圍：跟著游標定位已經沒有意義
+     *     （游標根本不在畫面上），這時才真的關閉。 */
+    function autoMenuScrollHandler(e) {
+        if (!autoMenuState) return;
+        const menu = $('varMenu');
+        if (menu.contains(e.target)) return; // 選單自己的捲動：不是要關閉/重新定位的訊號
+        const input = autoMenuState.input;
+        const inputRect = input.getBoundingClientRect();
+        const container = input.closest('.dialog__body');
+        const bound = container
+            ? container.getBoundingClientRect()
+            : { top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight };
+        const outOfView = inputRect.bottom <= bound.top || inputRect.top >= bound.bottom
+            || inputRect.right <= bound.left || inputRect.left >= bound.right;
+        if (outOfView) { closeAutoMenu(); return; }
+        positionAutoMenu();
+    }
 
     function openAutoMenu(input, entriesFn, start, filterText) {
         const entries = entriesFn();
@@ -1271,6 +1292,7 @@
     function renderAutoMenu() {
         const { input, filtered, index } = autoMenuState;
         const menu = $('varMenu');
+        let activeOpt = null;
         menu.replaceChildren(...filtered.map((entry, i) => {
             const opt = el('div', 'var-menu__option' + (i === index ? ' is-active' : ''));
             opt.id = 'varMenuOpt' + i;
@@ -1282,18 +1304,31 @@
                 e.preventDefault(); // 別讓輸入框先失焦——失焦會在點擊生效前就把選單關掉
                 acceptAutoOption(i);
             });
+            // 滑鼠移到選項上也要讓它變成 active——鍵盤高亮跟滑鼠 hover 狀態不能互相打架。
+            opt.addEventListener('mouseenter', () => setActiveIndex(i));
+            if (i === index) activeOpt = opt;
             return opt;
         }));
         menu.hidden = false;
         input.setAttribute('aria-expanded', 'true');
         input.setAttribute('aria-activedescendant', 'varMenuOpt' + index);
+        // block:'nearest' 只捲動選單自己這個捲動容器（真的被夾住才動，已可見時是 no-op），
+        // 不會牽動 .dialog__body 或整個頁面——這正是選用它而不是 'center'/'start' 的原因。
+        if (activeOpt) activeOpt.scrollIntoView({ block: 'nearest' });
+    }
+
+    /** 設定目前 active 的選項索引並重繪——鍵盤上下鍵與滑鼠 hover 共用同一個入口，確保兩者
+     *  的高亮狀態永遠一致。索引沒變就不重繪，避免滑鼠在同一格內小幅移動時反覆重建 DOM。 */
+    function setActiveIndex(index) {
+        if (!autoMenuState || autoMenuState.index === index) return;
+        autoMenuState.index = index;
+        renderAutoMenu();
     }
 
     function moveAutoSelection(delta) {
         if (!autoMenuState) return;
         const n = autoMenuState.filtered.length;
-        autoMenuState.index = (autoMenuState.index + delta + n) % n;
-        renderAutoMenu();
+        setActiveIndex((autoMenuState.index + delta + n) % n);
     }
 
     /** #varMenu 是 position:absolute，containing block 是它的直接父節點 <dialog>（唯一「已
