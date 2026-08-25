@@ -747,6 +747,7 @@
         $('monEnabled').checked = true;
         $('monNotifyOnFailure').checked = true;
         $('monHeaders').value = '';
+        renderHeadersCurrentHint(null);
         setRuleRows([]);
         setSecretsExisting([]);
         setSecretsNewRows([]);
@@ -769,6 +770,7 @@
         $('monUrl').value = m.url;
         $('monBody').value = m.requestBody || '';
         $('monHeaders').value = '';
+        renderHeadersCurrentHint(m);
         $('monInterval').value = m.intervalSeconds;
         $('monCompareMode').value = m.compareMode;
         setRuleRows(m.extractRules || []);
@@ -786,6 +788,48 @@
         syncMonitorMethod();
         syncMonitorCompareMode();
         $('monitorDialog').showModal();
+    }
+
+    /**
+     * 更新 header 欄位上方「目前已設定：...」的提示與「顯示目前值」按鈕的顯示與否。
+     *
+     * <p>{@code m} 為 {@code null}（新增模式）時沒有「既有值」可言，整排隱藏。編輯模式下
+     * 只看 {@code headerNames}（見 AdminDto.MonitorSummary 的說明，儲存後一定會回傳這個
+     * 欄位）——這是這次修正的重點：儲存後如果這裡沒有列出剛剛存的名稱，代表真的沒存進去，
+     * 而不是像過去那樣，欄位單純被清空成看不出兩種情況的差異。
+     */
+    function renderHeadersCurrentHint(m) {
+        const row = $('monHeadersCurrentRow');
+        const hint = $('monHeadersCurrent');
+        const showBtn = $('monHeadersShowBtn');
+        if (!m) {
+            row.hidden = true;
+            hint.textContent = '';
+            showBtn.hidden = true;
+            return;
+        }
+        const names = m.headerNames || [];
+        row.hidden = false;
+        showBtn.hidden = names.length === 0;
+        hint.textContent = names.length
+            ? `目前已設定：${names.join(', ')}（留空 = 不變更）`
+            : '目前沒有設定自訂 header。';
+    }
+
+    /** 「顯示目前值」：解密回傳一次，填進 textarea 讓使用者可以編輯後直接存檔。不落地、不快取。 */
+    async function showCurrentHeaders() {
+        if (!editingMonitor) return;
+        const btn = $('monHeadersShowBtn');
+        btn.disabled = true;
+        try {
+            const headers = await call('/monitors/' + editingMonitor.id + '/headers');
+            $('monHeaders').value = Object.keys(headers).length ? JSON.stringify(headers, null, 2) : '';
+            toast('已帶入目前的 header 值');
+        } catch (e) {
+            toast(e.message, true);
+        } finally {
+            btn.disabled = false;
+        }
     }
 
     function fillClientSelect(sel) {
@@ -1771,6 +1815,7 @@
     $('newMonitorBtn').addEventListener('click', openMonitorCreate);
     $('monImportBtn').addEventListener('click', importMonitorRaw);
     $('monCopySchemaBtn').addEventListener('click', copyImportSchema);
+    $('monHeadersShowBtn').addEventListener('click', showCurrentHeaders);
     $('monAddRule').addEventListener('click', () => addRuleRow('', ''));
     $('monAddSecret').addEventListener('click', () => addSecretRow('', ''));
     $('monAddComputedField').addEventListener('click', () => addComputedFieldBlock(null));
