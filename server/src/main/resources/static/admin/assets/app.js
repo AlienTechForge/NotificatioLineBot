@@ -734,6 +734,8 @@
     // ---- 新增/編輯抽屜 ----
 
     let editingMonitor = null; // null = 新增模式
+    /** 訊息模板是否仍是「還沒被使用者動過」的狀態——只有這樣才允許自動改寫預設模板（doc 14 §2.2）。 */
+    let templatePristine = true;
 
     function openMonitorCreate() {
         editingMonitor = null;
@@ -748,10 +750,12 @@
         $('monNotifyOnFailure').checked = true;
         $('monHeaders').value = '';
         renderHeadersCurrentHint(null);
+        templatePristine = true;
         setRuleRows([]);
         setSecretsExisting([]);
         setSecretsNewRows([]);
         setComputedFieldRows([]);
+        refreshDefaultTemplateIfPristine();
         clearTestResult();
         syncMonitorMethod();
         syncMonitorCompareMode();
@@ -760,6 +764,7 @@
 
     function openMonitorEdit(m) {
         editingMonitor = m;
+        templatePristine = false; // 編輯既有監控不套用任何預設，一律顯示已存的值（doc 14 §2.2 末段）
         $('monitorTitle').textContent = '編輯監控：' + m.name;
         $('monitorError').hidden = true;
         clearImportState();
@@ -878,9 +883,10 @@
         pointerInput.value = pointer || '';
         const removeBtn = el('button', 'btn btn--sm btn--ghost', '移除');
         removeBtn.type = 'button';
-        removeBtn.addEventListener('click', () => row.remove());
+        removeBtn.addEventListener('click', () => { row.remove(); refreshDefaultTemplateIfPristine(); });
         row.append(nameInput, pointerInput, removeBtn);
         $('monRulesRows').append(row);
+        refreshDefaultTemplateIfPristine();
     }
 
     function collectRuleRows() {
@@ -890,6 +896,32 @@
                 pointer: row.querySelector('.rule-row__pointer').value.trim(),
             }))
             .filter((r) => r.name || r.pointer);
+    }
+
+    // ---- 預設訊息模板：doc 14 §2 ----
+    //
+    // 欄位名一律動態取自使用者自己的解析規則，絕不可寫死——寫死等於對其他監控都是錯的
+    // （doc 14 §2.2）。用 pristine 旗標而非「內容等於預設字串」判斷是否還能自動覆寫：
+    // 使用者可能手動改回一模一樣的內容，仍然算「已經動過」，之後不再自動覆寫。
+
+    function ruleNames() {
+        return Array.from($('monRulesRows').querySelectorAll('.rule-row__name'))
+            .map((i) => i.value.trim())
+            .filter(Boolean);
+    }
+
+    function firstRuleName() {
+        return ruleNames()[0] || 'NAME';
+    }
+
+    function defaultMessageTemplate(fieldName) {
+        return `{{monitor.name}}\n原本：{{old.${fieldName}}}\n現在：{{value.${fieldName}}}\n時間：{{now}}`;
+    }
+
+    /** 只在「新增監控」且模板仍是 pristine 時才覆寫；編輯既有監控一律不套用（doc 14 §2.2 末段）。 */
+    function refreshDefaultTemplateIfPristine() {
+        if (editingMonitor || !templatePristine) return;
+        $('monTemplate').value = defaultMessageTemplate(firstRuleName());
     }
 
     // ---- 密鑰（monitor_secret）編輯：doc 13 §7 ----
@@ -1003,6 +1035,7 @@
         inputField.placeholder = '輸入模板，例如 {{secret.appsecret}}{{now.epochSeconds}}{{secret.deviceid}}';
         inputField.className = 'computed-field__input';
         inputField.value = (field && field.input) || '';
+        wireAutocomplete(inputField, computedInputVarEntries);
         block.append(inputField);
 
         const stepsBox = el('div', 'computed-field__steps');
@@ -1086,6 +1119,249 @@
                 };
             })
             .filter((f) => f.name || f.input || f.steps.length);
+    }
+
+    // ---- {{ 自動完成：doc 14 §4 ----
+    //
+    // 三組變數集合彼此獨立，絕不能混用——給錯清單比沒有更糟，使用者會信任選單，選到一個
+    // 在當下情境無效的變數，換來 —（訊息模板）或存檔 400（請求模板／計算欄位輸入），見 doc 14 §4.1。
+    // 全部依「當下表單狀態」現算，不快取，見 doc 14 §4.2。
+
+    function computedFieldNames() {
+        return Array.from($('monComputedRows').querySelectorAll('.computed-field__name'))
+            .map((i) => i.value.trim())
+            .filter(Boolean);
+    }
+
+    function existingSecretNames() {
+        return Array.from($('monSecretsExisting').querySelectorAll('.cell-mono'), (n) => n.textContent);
+    }
+
+    function newSecretNames() {
+        return Array.from($('monSecretsNewRows').querySelectorAll('.secret-row__name'))
+            .map((i) => i.value.trim())
+            .filter(Boolean);
+    }
+
+    /** 既有的與這次新填的密鑰都要列入（doc 14 §4.2）。 */
+    function allSecretNames() {
+        return [...new Set([...existingSecretNames(), ...newSecretNames()])];
+    }
+
+    /** 訊息模板（monTemplate）專用變數集合：doc 14 §3.1。 */
+    function messageVarEntries() {
+        const names = ruleNames();
+        const entries = [];
+        names.forEach((n) => entries.push({ text: `value.${n}`, desc: '本次抓到的值' }));
+        names.forEach((n) => entries.push({ text: `old.${n}`, desc: '上一次的值（試算時為 —）' }));
+        if ($('monCompareMode').value === 'NEW_ITEMS') {
+            names.forEach((n) => entries.push({ text: `item.${n}`, desc: '該筆新項目的欄位（僅 NEW_ITEMS 模式）' }));
+        }
+        entries.push({ text: 'monitor.name', desc: '監控名稱' });
+        entries.push({ text: 'now', desc: '現在時間 MM/dd HH:mm（台北）' });
+        return entries;
+    }
+
+    /** 請求模板（URL／header／body）專用變數集合：doc 14 §3.2。 */
+    function requestTemplateVarEntries() {
+        const entries = [
+            { text: 'now.epochSeconds', desc: 'Unix 秒' },
+            { text: 'now.epochMillis', desc: 'Unix 毫秒' },
+            { text: 'now.iso8601', desc: 'ISO 8601（UTC，秒精度）' },
+            { text: 'now.format:yyyy-MM-dd HH:mm:ss', desc: '自訂格式（台北時區），可自行修改 pattern' },
+            { text: 'now-1h.format:yyyy-MM-dd', desc: '位移範例，可改天數與單位（s/m/h/d）' },
+            { text: 'uuid', desc: '隨機 UUID（同一次請求內同值）' },
+        ];
+        computedFieldNames().forEach((n) => entries.push({ text: `computed.${n}`, desc: '計算欄位' }));
+        return entries;
+    }
+
+    /** 計算欄位「輸入」專用變數集合：doc 14 §3.3——請求模板全部變數，外加只能用在這裡的 secret.*。 */
+    function computedInputVarEntries() {
+        const entries = requestTemplateVarEntries();
+        allSecretNames().forEach((n) => entries.push({
+            text: `secret.${n}`,
+            desc: '密鑰（只能用在計算欄位的輸入，不能出現在 URL／header／body）',
+        }));
+        return entries;
+    }
+
+    let autoMenuState = null; // { input, entriesFn, start, filtered, index } | null
+
+    /** 從游標往前找最近的 {{：中間出現 }}／{／換行都代表不是「觸發中」的片段，回傳 null。 */
+    function findTriggerStart(value, caret) {
+        const before = value.slice(0, caret);
+        const idx = before.lastIndexOf('{{');
+        if (idx === -1) return null;
+        const between = before.slice(idx + 2);
+        if (/[{}\n]/.test(between)) return null;
+        return idx;
+    }
+
+    const CARET_MIRROR_PROPS = [
+        'boxSizing', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+        'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+        'fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing', 'lineHeight',
+        'textTransform', 'wordSpacing', 'textIndent', 'tabSize',
+    ];
+
+    /** 量測 <textarea>/<input> 目前游標的 viewport 座標——原生表單元素沒有 API 可以直接問，
+     *  標準做法是建一個套用同一份排版相關 CSS 的隱藏鏡像元素，量測游標位置的 <span>。 */
+    function getCaretViewportRect(input) {
+        const rect = input.getBoundingClientRect();
+        const style = getComputedStyle(input);
+        const isTextarea = input.tagName === 'TEXTAREA';
+        const mirror = document.createElement('div');
+        mirror.style.position = 'fixed';
+        mirror.style.visibility = 'hidden';
+        mirror.style.left = rect.left + 'px';
+        mirror.style.top = rect.top + 'px';
+        mirror.style.width = rect.width + 'px';
+        mirror.style.whiteSpace = isTextarea ? 'pre-wrap' : 'pre';
+        mirror.style.wordWrap = 'break-word';
+        mirror.style.overflowWrap = 'break-word';
+        CARET_MIRROR_PROPS.forEach((prop) => { mirror.style[prop] = style[prop]; });
+
+        const caret = input.selectionStart;
+        const marker = document.createElement('span');
+        marker.textContent = '\u200b';
+        mirror.append(
+            document.createTextNode(input.value.slice(0, caret)),
+            marker,
+            document.createTextNode(input.value.slice(caret) || '\u200b'),
+        );
+        document.body.append(mirror);
+        const markerRect = marker.getBoundingClientRect();
+        mirror.remove();
+        return {
+            left: markerRect.left - input.scrollLeft,
+            top: markerRect.top - input.scrollTop,
+            bottom: markerRect.bottom - input.scrollTop,
+        };
+    }
+
+    /** 選單開著時使用者捲動了外層的 dialog__body：位置會失準，直接關掉比硬追蹤更穩妥。 */
+    function autoMenuScrollHandler() { closeAutoMenu(); }
+
+    function openAutoMenu(input, entriesFn, start, filterText) {
+        const entries = entriesFn();
+        const filtered = filterText
+            ? entries.filter((en) => en.text.toLowerCase().includes(filterText.toLowerCase()))
+            : entries;
+        if (!filtered.length) { closeAutoMenu(); return; }
+        const wasOpen = !!autoMenuState;
+        autoMenuState = { input, entriesFn, start, filtered, index: 0 };
+        renderAutoMenu();
+        positionAutoMenu();
+        if (!wasOpen) document.addEventListener('scroll', autoMenuScrollHandler, true);
+    }
+
+    function closeAutoMenu() {
+        if (!autoMenuState) return;
+        const input = autoMenuState.input;
+        document.removeEventListener('scroll', autoMenuScrollHandler, true);
+        autoMenuState = null;
+        input.removeAttribute('aria-expanded');
+        input.removeAttribute('aria-activedescendant');
+        const menu = $('varMenu');
+        menu.hidden = true;
+        menu.replaceChildren();
+    }
+
+    function renderAutoMenu() {
+        const { input, filtered, index } = autoMenuState;
+        const menu = $('varMenu');
+        menu.replaceChildren(...filtered.map((entry, i) => {
+            const opt = el('div', 'var-menu__option' + (i === index ? ' is-active' : ''));
+            opt.id = 'varMenuOpt' + i;
+            opt.setAttribute('role', 'option');
+            opt.setAttribute('aria-selected', i === index ? 'true' : 'false');
+            opt.append(el('span', 'var-menu__var', '{{' + entry.text + '}}'));
+            opt.append(el('span', 'var-menu__desc', entry.desc));
+            opt.addEventListener('mousedown', (e) => {
+                e.preventDefault(); // 別讓輸入框先失焦——失焦會在點擊生效前就把選單關掉
+                acceptAutoOption(i);
+            });
+            return opt;
+        }));
+        menu.hidden = false;
+        input.setAttribute('aria-expanded', 'true');
+        input.setAttribute('aria-activedescendant', 'varMenuOpt' + index);
+    }
+
+    function moveAutoSelection(delta) {
+        if (!autoMenuState) return;
+        const n = autoMenuState.filtered.length;
+        autoMenuState.index = (autoMenuState.index + delta + n) % n;
+        renderAutoMenu();
+    }
+
+    function positionAutoMenu() {
+        const { input } = autoMenuState;
+        const caretRect = getCaretViewportRect(input);
+        const menu = $('varMenu');
+        const menuRect = menu.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        let left = caretRect.left;
+        let top = caretRect.bottom + 4;
+        if (left + menuRect.width > vw - 8) left = Math.max(8, vw - 8 - menuRect.width);
+        if (top + menuRect.height > vh - 8) top = Math.max(8, caretRect.top - menuRect.height - 4);
+        menu.style.left = left + 'px';
+        menu.style.top = top + 'px';
+    }
+
+    function acceptAutoOption(index) {
+        if (!autoMenuState) return;
+        const { input, start, filtered } = autoMenuState;
+        const entry = filtered[index != null ? index : autoMenuState.index];
+        const value = input.value;
+        const caret = input.selectionStart;
+        const insertText = '{{' + entry.text + '}}';
+        input.value = value.slice(0, start) + insertText + value.slice(caret);
+        const newCaret = start + insertText.length;
+        input.setSelectionRange(newCaret, newCaret);
+        closeAutoMenu();
+        input.focus();
+        // 選單插入也算「使用者動過模板」——不然選完馬上被下一次的自動預設覆寫掉（doc 14 §2.2）。
+        if (input === $('monTemplate')) templatePristine = false;
+    }
+
+    /** 掛上 {{ 自動完成：輸入 {{ 後即時觸發並依打字內容過濾，或按 Ctrl+Space 手動叫出（doc 14 §4.3）。
+     *  entriesFn 現算，永遠反映當下表單狀態，見本節開頭的說明。 */
+    function wireAutocomplete(input, entriesFn) {
+        input.setAttribute('aria-autocomplete', 'list');
+        input.setAttribute('aria-controls', 'varMenu');
+        input.addEventListener('input', () => {
+            const caret = input.selectionStart;
+            const start = findTriggerStart(input.value, caret);
+            if (start === null) { closeAutoMenu(); return; }
+            openAutoMenu(input, entriesFn, start, input.value.slice(start + 2, caret));
+        });
+        input.addEventListener('keydown', (e) => {
+            if (autoMenuState && autoMenuState.input === input) {
+                if (e.key === 'ArrowDown') { e.preventDefault(); moveAutoSelection(1); return; }
+                if (e.key === 'ArrowUp') { e.preventDefault(); moveAutoSelection(-1); return; }
+                if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); acceptAutoOption(); return; }
+                if (e.key === 'Escape') { e.preventDefault(); closeAutoMenu(); return; }
+                return;
+            }
+            if (e.ctrlKey && e.code === 'Space') {
+                e.preventDefault();
+                const caret = input.selectionStart;
+                const start = findTriggerStart(input.value, caret);
+                if (start !== null) {
+                    openAutoMenu(input, entriesFn, start, input.value.slice(start + 2, caret));
+                } else {
+                    openAutoMenu(input, entriesFn, caret, '');
+                }
+            }
+        });
+        input.addEventListener('blur', () => {
+            // 失焦關閉（doc 14 §4.3）。用 setTimeout 讓點擊選項的 mousedown/click 序列先跑完
+            // 再檢查——選項的 mousedown 已 preventDefault，正常點選不會真的觸發這裡的失焦。
+            setTimeout(() => { if (autoMenuState && autoMenuState.input === input) closeAutoMenu(); }, 0);
+        });
     }
 
     /** 讀取表單，回傳完整設定物件。header 欄位若不是合法 JSON 會直接丟例外，呼叫端要接住。 */
@@ -1306,7 +1582,7 @@
             const result = await call('/monitors/test', { method: 'POST', body: JSON.stringify(body) });
             resetFieldVolatility();
             lastMonitorTest = result.ok ? { result, compareMode: form.compareMode } : null;
-            renderMonitorTestResult(result, form.compareMode, null);
+            renderMonitorTestResult(result, form.compareMode, null, form.messageTemplate);
         } catch (e) {
             box.replaceChildren(el('div', 'notice notice--error', e.message));
         } finally { btn.disabled = false; btn.textContent = '立即測試'; }
@@ -1335,14 +1611,14 @@
                 diffInfo = { valueDiff, bodyDiff };
                 lastMonitorTest = { result, compareMode: form.compareMode };
             }
-            renderMonitorTestResult(result, form.compareMode, diffInfo);
+            renderMonitorTestResult(result, form.compareMode, diffInfo, form.messageTemplate);
             if (result.ok) toast('已再抓一次並比對');
         } catch (e) {
             toast(e.message, true);
         } finally { btn.disabled = false; btn.textContent = '再抓一次比對'; }
     }
 
-    function renderMonitorTestResult(result, compareMode, diffInfo) {
+    function renderMonitorTestResult(result, compareMode, diffInfo, messageTemplate) {
         const box = $('monTestResult');
         box.replaceChildren();
 
@@ -1411,12 +1687,30 @@
         lastBodyDiffInfo = diffInfo ? diffInfo.bodyDiff : null;
         box.append(fieldPickerTree(result, compareMode, lastBodyDiffInfo));
 
+        templateCaveatNotices(messageTemplate, compareMode).forEach((msg) => {
+            box.append(el('div', 'notice notice--warning', msg));
+        });
+
         box.append(el('p', 'fieldset-label', '渲染後的訊息'));
         const pre = el('pre', 'test-message');
         pre.textContent = result.renderedMessage || '（空）';
         box.append(pre);
 
         $('monRetestBtn').hidden = false;
+    }
+
+    /** 試算的兩個已知坑（doc 14 §1、§5）：試算沒有「上一次」可比、比對模式非 NEW_ITEMS 卻用了
+     *  {{item.*}}。都不是 bug，是使用者無從得知——直接把原因標在結果旁邊。 */
+    function templateCaveatNotices(messageTemplate, compareMode) {
+        const notices = [];
+        const template = messageTemplate || '';
+        if (/\{\{old\./.test(template)) {
+            notices.push('試算沒有「上一次」可比，{{old.*}} 一律顯示 —。正式通知時會有值。');
+        }
+        if (compareMode !== 'NEW_ITEMS' && /\{\{item\./.test(template)) {
+            notices.push('比對模式不是 NEW_ITEMS，{{item.*}} 在此模式下永遠是 —（僅 NEW_ITEMS 逐筆渲染時才有值）。');
+        }
+        return notices;
     }
 
     /** name=value 的 chip，diffInfo 非空時附加「有變動」／「每次都變」標記，見 doc 12 §4.3。 */
@@ -1817,6 +2111,9 @@
     $('monCopySchemaBtn').addEventListener('click', copyImportSchema);
     $('monHeadersShowBtn').addEventListener('click', showCurrentHeaders);
     $('monAddRule').addEventListener('click', () => addRuleRow('', ''));
+    $('monRulesRows').addEventListener('input', (e) => {
+        if (e.target.classList.contains('rule-row__name')) refreshDefaultTemplateIfPristine();
+    });
     $('monAddSecret').addEventListener('click', () => addSecretRow('', ''));
     $('monAddComputedField').addEventListener('click', () => addComputedFieldBlock(null));
     $('monMethod').addEventListener('change', syncMonitorMethod);
@@ -1826,6 +2123,11 @@
     $('monTestBtn').addEventListener('click', testMonitorNow);
     $('monRetestBtn').addEventListener('click', retestMonitorNow);
     $('monitorRunsClose').addEventListener('click', () => $('monitorRunsDialog').close());
+    $('monTemplate').addEventListener('input', () => { templatePristine = false; });
+    wireAutocomplete($('monTemplate'), messageVarEntries);
+    wireAutocomplete($('monUrl'), requestTemplateVarEntries);
+    wireAutocomplete($('monHeaders'), requestTemplateVarEntries);
+    wireAutocomplete($('monBody'), requestTemplateVarEntries);
 
     $('logoutForm').addEventListener('submit', (e) => {
         const t = csrfToken();
