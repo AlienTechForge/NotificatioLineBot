@@ -40,6 +40,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -347,6 +348,80 @@ class AdminMonitorIT extends PostgresIntegrationTest {
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
         assertThat(runsBody).doesNotContain("ciphertext").doesNotContain("super-secret-leak-check");
+    }
+
+    // ------------------------------------------------------------ headerNames／header 值端點（fix/monitor-header-visibility）
+
+    @Test
+    @DisplayName("headerNames：依名稱排序回傳，回應本身不含任何 header 值")
+    void headerNames_listedInSummary_valuesNeverLeak() throws Exception {
+        createMonitorViaApi(Map.of(
+                "Authorization", "Bearer secret-token-abc",
+                "DeviceType", "android",
+                "Accept", "application/json"));
+
+        String listBody = mockMvc.perform(get("/admin/api/monitors").with(admin()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].hasHeaders").value(true))
+                .andExpect(jsonPath("$.data[0].headerNames.length()").value(3))
+                .andExpect(jsonPath("$.data[0].headerNames[0]").value("Accept"))
+                .andExpect(jsonPath("$.data[0].headerNames[1]").value("Authorization"))
+                .andExpect(jsonPath("$.data[0].headerNames[2]").value("DeviceType"))
+                .andReturn().getResponse().getContentAsString();
+        assertThat(listBody)
+                .doesNotContain("secret-token-abc")
+                .doesNotContain("android")
+                .doesNotContain("application/json");
+    }
+
+    @Test
+    @DisplayName("沒有設定 header 的監控 → headerNames 空陣列，hasHeaders 為 false")
+    void headerNames_empty_whenNoHeaders() throws Exception {
+        createMonitorViaApi(null);
+
+        mockMvc.perform(get("/admin/api/monitors").with(admin()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].hasHeaders").value(false))
+                .andExpect(jsonPath("$.data[0].headerNames").isArray())
+                .andExpect(jsonPath("$.data[0].headerNames.length()").value(0));
+    }
+
+    @Test
+    @DisplayName("GET /monitors/{id}/headers：回傳解密後的原始值，帶 Cache-Control: no-store")
+    void getMonitorHeaders_returnsDecryptedValues() throws Exception {
+        Long id = createMonitorViaApi(Map.of(
+                "Authorization", "Bearer rotate-me-token", "Accept", "application/json"));
+
+        mockMvc.perform(get("/admin/api/monitors/{id}/headers", id).with(admin()))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.data.Authorization").value("Bearer rotate-me-token"))
+                .andExpect(jsonPath("$.data.Accept").value("application/json"));
+    }
+
+    @Test
+    @DisplayName("GET /monitors/{id}/headers：沒有設定 header 的監控回空 map，不是錯誤")
+    void getMonitorHeaders_emptyWhenNoHeaders() throws Exception {
+        Long id = createMonitorViaApi(null);
+
+        mockMvc.perform(get("/admin/api/monitors/{id}/headers", id).with(admin()))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.data").isEmpty());
+    }
+
+    @Test
+    @DisplayName("GET /monitors/{id}/headers：監控不存在 → 404")
+    void getMonitorHeaders_unknownMonitor_notFound() throws Exception {
+        mockMvc.perform(get("/admin/api/monitors/{id}/headers", 999_999L).with(admin()))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    @DisplayName("GET /monitors/{id}/headers：未登入 → 401")
+    void getMonitorHeaders_anonymous_rejected() throws Exception {
+        mockMvc.perform(get("/admin/api/monitors/{id}/headers", 1L))
+                .andExpect(status().isUnauthorized());
     }
 
     // ------------------------------------------------------------ 試跑：安全關鍵，必須走 OutboundUrlGuard
