@@ -417,8 +417,10 @@ input:focus, textarea:focus, select:focus {
 textarea { min-height: 96px; resize: vertical; line-height: 1.6; }
 select { min-height: 42px; }
 
-.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); }
-@media (max-width: 640px) { .form-row { grid-template-columns: 1fr; } }
+/* auto-fit 依這個 <dialog> 目前實際的寬度決定要不要並排，不是視窗寬度：抽屜預設 65vw，
+   在很寬的螢幕上仍然是相對窄的一個抽屜，用 @media (max-width) 抓視窗寬度永遠不會在
+   需要的時候收成一欄；拖曳把手改寬度時也會自動跟著重新排列，不必額外掛 resize 監聽。 */
+.form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--sp-4); }
 
 fieldset { border: none; margin: 0; padding: 0; }
 .choices { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--sp-2); }
@@ -493,10 +495,17 @@ fieldset { border: none; margin: 0; padding: 0; }
 .var-ref__section { margin-top: var(--sp-3); }
 .var-ref__title { font-size: 12.5px; font-weight: 650; margin: 0 0 var(--sp-2); }
 
-/* {{ 自動完成選單：position:fixed 讓它不受 .dialog__body 的 overflow-y:auto 裁切（doc 14 §4.3），
-   且因為是 #monitorDialog 的子節點，仍畫在 <dialog> 的 top layer 裡、蓋在抽屜內容之上。 */
+/* {{ 自動完成選單：是 #monitorDialog 的直接子節點（不在 .dialog__body 裡），所以不受
+   .dialog__body 的 overflow-y:auto 裁切，且仍畫在 <dialog> 的 top layer 裡、蓋在抽屜內容之上。
+   position 刻意用 absolute、不是 fixed：<dialog> 本身是「已定位」元素（position:fixed），
+   position:absolute 的子節點依規範一律以它為 containing block，跟視窗座標無關——這個對應
+   永遠是規範定義好的。舊版用 fixed 時，只要 .dialog[open] 的 drawer-in 進場動畫還在套用
+   transform（fill-mode:both 停在 transform:none 那一格，部分瀏覽器仍回報成單位矩陣而非
+   字面上的 none），<dialog> 就會變成 fixed 子節點的 containing block，把 app.js 算好的
+   視窗座標當成「相對 <dialog>」的座標再誤用一次，選單因此被推到畫面外（見
+   positionAutoMenu() 的換算）。 */
 .var-menu {
-    position: fixed;
+    position: absolute;
     z-index: 70;
     min-width: 260px;
     max-width: min(420px, calc(100vw - 16px));
@@ -565,15 +574,26 @@ fieldset { border: none; margin: 0; padding: 0; }
 
 dialog:not([open]) { display: none; }
 dialog {
+    /* 抽屜寬度：預設 65vw，min/max 夾住避免小螢幕或超寬螢幕跑出合理範圍。用自訂屬性
+       （不是直接寫 width）是為了讓 app.js 的拖曳調寬／還原上次寬度只要覆寫這一個變數，
+       不必重覆 min/max 夾取邏輯，也不會被下面 dialog--wide 或手機版 media query 打架。 */
+    --dialog-w: clamp(420px, 65vw, 95vw);
     position: fixed; inset-block: 0; inset-inline-start: auto; inset-inline-end: 0; margin: 0;
     border: none; border-inline-start: 1px solid var(--c-border-strong); border-radius: 0;
     background: var(--c-surface-solid); color: var(--c-fg); padding: 0;
-    width: min(460px, 100vw);
+    width: min(var(--dialog-w), 100vw);
     height: 100dvh; max-height: 100dvh;
     box-shadow: var(--shadow-lg);
 }
-dialog.dialog--wide { width: min(760px, 100vw); }
+dialog.dialog--wide { --dialog-w: clamp(600px, 80vw, 95vw); }
 dialog[open] { display: flex; flex-direction: column; animation: drawer-in var(--motion-slow) both; }
+/* <form> 是 <dialog> 的直接子節點，必須自己也是 flex column 容器，.dialog__body 的
+   flex:1 1 auto 才吃得到；沒有這行，.dialog__body 只會長到內容的自然高度（往往遠超過
+   <dialog> 的可視高度），逼得 <dialog> 自己的 UA 預設 overflow:auto 介入捲動，
+   header／footer 跟著一起被捲走，不再固定，選單定位換算的「<dialog> 不會捲動」假設
+   也會跟著破功。min-height:0 是關鍵：flex item 預設的 min-height:auto 會用內容高度
+   當下限，不會真的縮到容器可視高度以內。 */
+dialog > form { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 @keyframes drawer-in {
     from { opacity: 0; transform: translateX(24px); }
     to   { opacity: 1; transform: none; }
@@ -582,14 +602,32 @@ dialog::backdrop { background: rgb(4 8 16 / 0.55); backdrop-filter: blur(3px); }
 .dialog__head { padding: var(--sp-5); border-bottom: 1px solid var(--c-border); flex: none; }
 .dialog__head h3 { margin: 0; font-size: 17px; font-weight: 650; }
 .dialog__head p  { margin: 2px 0 0; font-size: 12px; color: var(--c-fg-muted); }
-.dialog__body { padding: var(--sp-5); overflow-y: auto; flex: 1 1 auto; }
+.dialog__body { padding: var(--sp-5); overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .dialog__foot {
     display: flex; justify-content: flex-end; gap: var(--sp-2);
     padding: var(--sp-4) var(--sp-5); border-top: 1px solid var(--c-border); flex: none;
 }
 
+/* 拖曳調寬把手：抽屜釘在畫面右邊，所以把手長在左邊界，跨一點邊界線讓抓取範圍寬鬆一點。
+   是 <dialog> 的直接子節點（app.js 用 dialog.prepend() 掛上去）、position:absolute，
+   不吃 flex 版面、不影響 <form> 的排版，跟 #varMenu 是同一個道理。 */
+.dialog__resize-handle {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: -4px;
+    width: 9px;
+    cursor: ew-resize;
+    touch-action: none;
+    background: transparent;
+    z-index: 10;
+    transition: background var(--motion);
+}
+.dialog__resize-handle:hover,
+.dialog__resize-handle.is-dragging { background: color-mix(in srgb, var(--c-primary) 35%, transparent); }
+
 @media (max-width: 560px) {
     dialog, dialog.dialog--wide { width: 100vw; }
+    .dialog__resize-handle { display: none; }
 }
 
 .secret-box {

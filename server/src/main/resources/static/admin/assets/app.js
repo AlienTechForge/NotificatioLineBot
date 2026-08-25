@@ -1296,19 +1296,40 @@
         renderAutoMenu();
     }
 
+    /** #varMenu 是 position:absolute，containing block 是它的直接父節點 <dialog>（唯一「已
+     *  定位」的祖先——dialog{ position:fixed }）。getCaretViewportRect() 回傳的是真正的視窗
+     *  座標，所以要先在視窗座標系裡夾住（不被右邊界／下邊界推出畫面），再換算成「相對
+     *  <dialog> 自己的內距框」的座標才能指定給 style.left/top——兩個座標系一旦搞混，數值
+     *  在 JS 端看起來完全正確，卻會被瀏覽器畫到畫面外（這正是這次修的那個 bug，
+     *  見 app.css 的 .var-menu 註解）。scrollLeft/scrollTop 理論上一律是 0（.dialog__body
+     *  才是真正會捲動的容器，見 app.css 的 `dialog > form` 註解），這裡仍然扣掉是防禦性
+     *  寫法，不假設以後的 CSS 改動不會讓 <dialog> 自己又變回會捲動。 */
     function positionAutoMenu() {
         const { input } = autoMenuState;
-        const caretRect = getCaretViewportRect(input);
+        const caretRect = getCaretViewportRect(input); // 視窗座標
         const menu = $('varMenu');
         const menuRect = menu.getBoundingClientRect();
         const vw = window.innerWidth;
         const vh = window.innerHeight;
+
+        // 先在視窗座標系裡夾住：右邊界溢出就左移，下邊界溢出就翻到游標上方；兩種夾法各自
+        // 還可能把選單推出另一側（例如翻到上方後仍超出頂端），所以再各補一次下限，確保
+        // 無論欄位多長、容器怎麼捲、視窗多窄都夾在畫面內。
         let left = caretRect.left;
         let top = caretRect.bottom + 4;
-        if (left + menuRect.width > vw - 8) left = Math.max(8, vw - 8 - menuRect.width);
-        if (top + menuRect.height > vh - 8) top = Math.max(8, caretRect.top - menuRect.height - 4);
-        menu.style.left = left + 'px';
-        menu.style.top = top + 'px';
+        if (left + menuRect.width > vw - 8) left = vw - 8 - menuRect.width;
+        if (left < 8) left = 8;
+        if (top + menuRect.height > vh - 8) top = caretRect.top - menuRect.height - 4;
+        if (top < 8) top = 8;
+
+        // 換算成 <dialog> 的 containing block 座標（padding box 起點 + 目前的捲動量）。
+        const dialog = menu.parentElement;
+        const dialogRect = dialog.getBoundingClientRect();
+        const dialogStyle = getComputedStyle(dialog);
+        const borderLeft = parseFloat(dialogStyle.borderLeftWidth) || 0;
+        const borderTop = parseFloat(dialogStyle.borderTopWidth) || 0;
+        menu.style.left = (left - dialogRect.left - borderLeft + dialog.scrollLeft) + 'px';
+        menu.style.top = (top - dialogRect.top - borderTop + dialog.scrollTop) + 'px';
     }
 
     function acceptAutoOption(index) {
@@ -2026,6 +2047,110 @@
         } catch (e) { toast(e.message, true); }
     }
 
+    // ============================================================ 對話框：關閉與拖曳調寬
+    //
+    // 套用在每一個 <dialog>，不是只有監控那個——一致的行為才不會讓使用者猜哪個抽屜可以
+    // 點外面關、哪個不行，或哪個可以拖寬、哪個不行。
+
+    const DIALOG_MIN_WIDTH = 420;
+    const DIALOG_MAX_WIDTH_RATIO = 0.95; // 對應 app.css 的 95vw，一律以目前視窗寬度換算
+
+    function dialogWidthStorageKey(dialog) {
+        return 'notifyline-admin:dialog-width:' + dialog.id;
+    }
+
+    /** localStorage 在無痕視窗、或站台資料被封鎖時讀寫都可能丟例外——一律吞掉，退回預設寬度。 */
+    function readStoredDialogWidth(dialog) {
+        try {
+            const raw = localStorage.getItem(dialogWidthStorageKey(dialog));
+            const n = raw ? Number(raw) : NaN;
+            return Number.isFinite(n) && n > 0 ? n : null;
+        } catch (e) { return null; }
+    }
+
+    function writeStoredDialogWidth(dialog, px) {
+        try { localStorage.setItem(dialogWidthStorageKey(dialog), String(Math.round(px))); }
+        catch (e) { /* 無痕視窗／被封鎖：改不到就算了，不影響這次操作本身 */ }
+    }
+
+    function clampDialogWidth(px) {
+        const max = Math.max(DIALOG_MIN_WIDTH, window.innerWidth * DIALOG_MAX_WIDTH_RATIO);
+        return Math.min(Math.max(px, DIALOG_MIN_WIDTH), max);
+    }
+
+    /** 點 <dialog> 自己（也就是 ::backdrop——瀏覽器沒辦法把事件掛在 pseudo-element 上，
+     *  點 backdrop 一律回報成點在 <dialog> 本身）關閉抽屜；點到面板內任何實際節點時
+     *  e.target 會是那個子節點、不是 dialog，藉此分辨「點外面」跟「點裡面」，不需要另外
+     *  疊一層遮罩元素（那會壞掉 <dialog> 原生的 top layer 行為）。選單開著時先收掉選單、
+     *  不關對話框——跟 Esc 的既有行為一致（見 wireAutocomplete 的 keydown 處理）。 */
+    function wireDialogBackdropClose(dialog) {
+        dialog.addEventListener('click', (e) => {
+            if (e.target !== dialog) return;
+            if (autoMenuState) { closeAutoMenu(); return; }
+            const r = dialog.getBoundingClientRect();
+            const insidePanel = e.clientX >= r.left && e.clientX <= r.right
+                && e.clientY >= r.top && e.clientY <= r.bottom;
+            if (!insidePanel) dialog.close();
+        });
+    }
+
+    /** 抽屜釘在畫面右邊，所以拖曳把手長在它的左邊界；往左拖（clientX 變小）＝變寬。
+     *  用 Pointer Events 而不是 mouse-only，觸控裝置也能拖。寬度存 localStorage，
+     *  下次開啟同一個 <dialog> 沿用上次的選擇。 */
+    function wireDialogResize(dialog) {
+        const handle = el('div', 'dialog__resize-handle');
+        handle.setAttribute('aria-hidden', 'true');
+        dialog.prepend(handle);
+
+        const stored = readStoredDialogWidth(dialog);
+        if (stored != null) dialog.style.setProperty('--dialog-w', clampDialogWidth(stored) + 'px');
+
+        let dragging = false;
+        let startX = 0;
+        let startWidth = 0;
+
+        function onPointerMove(e) {
+            if (!dragging) return;
+            const dx = e.clientX - startX;
+            dialog.style.setProperty('--dialog-w', clampDialogWidth(startWidth - dx) + 'px');
+        }
+
+        function endDrag(e) {
+            if (!dragging) return;
+            dragging = false;
+            handle.classList.remove('is-dragging');
+            document.removeEventListener('pointermove', onPointerMove);
+            document.removeEventListener('pointerup', endDrag);
+            document.removeEventListener('pointercancel', endDrag);
+            try { handle.releasePointerCapture(e.pointerId); } catch (e2) { /* 已釋放或不支援：無妨 */ }
+            writeStoredDialogWidth(dialog, dialog.getBoundingClientRect().width);
+        }
+
+        handle.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0) return; // 只認滑鼠左鍵／單指觸控（觸控的 button 也回報 0）
+            dragging = true;
+            startX = e.clientX;
+            startWidth = dialog.getBoundingClientRect().width;
+            handle.classList.add('is-dragging');
+            try { handle.setPointerCapture(e.pointerId); } catch (e2) { /* 不支援就退回一般事件流程 */ }
+            document.addEventListener('pointermove', onPointerMove);
+            document.addEventListener('pointerup', endDrag);
+            document.addEventListener('pointercancel', endDrag);
+            e.preventDefault();
+        });
+    }
+
+    /** 視窗被縮小到比先前存的寬度還窄時，把目前有自訂寬度的 <dialog> 重新夾一次——不然
+     *  使用者在大螢幕拖寬存起來的值，換到小螢幕會直接把抽屜推出畫面外。 */
+    function reclampDialogWidths() {
+        document.querySelectorAll('dialog').forEach((dialog) => {
+            if (!dialog.style.getPropertyValue('--dialog-w')) return;
+            const current = parseFloat(getComputedStyle(dialog).width);
+            if (Number.isFinite(current)) dialog.style.setProperty('--dialog-w', clampDialogWidth(current) + 'px');
+        });
+    }
+    window.addEventListener('resize', reclampDialogWidths);
+
     // ------------------------------------------------------------ 小工具
 
     function td(text) { return el('td', null, text); }
@@ -2128,6 +2253,11 @@
     wireAutocomplete($('monUrl'), requestTemplateVarEntries);
     wireAutocomplete($('monHeaders'), requestTemplateVarEntries);
     wireAutocomplete($('monBody'), requestTemplateVarEntries);
+
+    document.querySelectorAll('dialog').forEach((dialog) => {
+        wireDialogBackdropClose(dialog);
+        wireDialogResize(dialog);
+    });
 
     $('logoutForm').addEventListener('submit', (e) => {
         const t = csrfToken();
