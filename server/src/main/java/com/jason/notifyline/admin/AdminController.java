@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -193,6 +194,22 @@ public class AdminController {
     @GetMapping("/monitors/{id}/runs")
     public ApiResponse<List<AdminDto.MonitorRunSummary>> monitorRuns(@PathVariable Long id) {
         return ApiResponse.ok(adminService.monitorRuns(id));
+    }
+
+    /**
+     * 監控目前設定的 header 明文（{@code name -> value}），供編輯抽屜的「顯示目前值」
+     * 按鈕使用——<strong>不列在</strong> {@link #listMonitors} 的摘要回應裡，值只在使用者
+     * 明確呼叫這個端點時才會離開伺服器，見 {@link AdminDto.MonitorSummary} 類別註解。
+     *
+     * <p>回應帶 {@code Cache-Control: no-store}，理由跟 {@link #importMonitor} 一樣：
+     * 內容機敏，不可被瀏覽器或中介的快取留存。沒有設定 header 的監控回空 map（{@code 200}），
+     * 不是錯誤。
+     */
+    @GetMapping("/monitors/{id}/headers")
+    public ResponseEntity<ApiResponse<Map<String, String>>> monitorHeaders(@PathVariable Long id) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(ApiResponse.ok(adminService.monitorHeaders(id)));
     }
 
     /**

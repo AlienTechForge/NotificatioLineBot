@@ -411,8 +411,15 @@
 
             <div class="field">
                 <label for="monHeaders">自訂 header（JSON，選填）</label>
+                <div class="field-row-between" id="monHeadersCurrentRow" hidden>
+                    <p class="hint" id="monHeadersCurrent"></p>
+                    <button type="button" class="btn btn--sm btn--ghost" id="monHeadersShowBtn" hidden>
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                        顯示目前值
+                    </button>
+                </div>
                 <textarea id="monHeaders" placeholder='{"Authorization":"Bearer xxx"}'></textarea>
-                <p class="hint" id="monHeadersHint">格式：扁平的字串對字串 JSON 物件。可用 <code>{{computed.NAME}}</code> 引用下面的計算欄位。</p>
+                <p class="hint" id="monHeadersHint">格式：扁平的字串對字串 JSON 物件。可用 <code>{{computed.NAME}}</code> 引用下面的計算欄位。留空 = 不變更既有 header。</p>
             </div>
 
             <div class="field">

@@ -398,6 +398,11 @@ table.grid { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .field > label, .fieldset-label { display: block; font-size: 13px; font-weight: 600; margin-bottom: var(--sp-2); }
 .hint { font-size: 12px; color: var(--c-fg-muted); margin: var(--sp-1) 0 0; }
 
+/* 欄位上方一行「目前已設定：...」提示＋一顆按鈕（例如監控 header 的「顯示目前值」），
+   兩端對齊、窄螢幕自動換行。 */
+.field-row-between { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-2); }
+.field-row-between .hint { margin: 0; }
+
 input[type="text"], input[type="password"], input[type="number"], input[type="datetime-local"], textarea, select {
     width: 100%; min-height: 42px; padding: var(--sp-2) var(--sp-3);
     border: 1px solid var(--c-border-strong); border-radius: var(--radius-sm);

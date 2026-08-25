@@ -272,10 +272,23 @@ public final class AdminDto {
 
     /**
      * 監控清單一列，同時也是後台編輯抽屜的預填資料。<strong>刻意不含</strong>
-     * {@code headers_ciphertext}、{@code headers_iv} 或解密後的 header 值——理由同類別
-     * 註解：{@code hasHeaders} 只說「有沒有設定」，不透露內容。{@code secretNames} 同理
-     * ——只有名稱，<strong>絕不含 secret 值</strong>。{@code computedFields} 本身不是
-     * 機敏資料（只是公式：輸入模板 + 演算法 + 編碼），可以完整回傳。
+     * {@code headers_ciphertext}、{@code headers_iv} 或解密後的 header <strong>值</strong>
+     * ——那些只透過 {@code GET /admin/api/monitors/{id}/headers} 明確請求才會回傳
+     * （見該端點的說明），列表／摘要不是「順便夾帶機敏內容」的地方。
+     *
+     * <p>{@code headerNames}（排序過）則<strong>刻意含</strong>——header
+     * <em>名稱</em>（{@code accept}、{@code authorization} 這類）不是機密，原本「連名稱
+     * 都不回」的規則把儲存是否成功這件事變得無法從畫面確認：使用者從匯入帶進 header、
+     * 按儲存、抽屜重開時欄位一片空白（因為 {@code hasHeaders} 只有布林值），跟「根本沒存進去」
+     * 長得一模一樣。見 {@code fix/monitor-header-visibility} 這次修正的討論——把名稱顯示
+     * 出來，使用者才能立刻確認「剛剛存的到底是哪幾個」。{@code hasHeaders} 保留給只需要
+     * 「有沒有設定」這個布林判斷的既有呼叫端。
+     *
+     * <p>{@code secretNames} 不同：那些是<strong>使用者刻意標記為 secret</strong> 的欄位
+     * （簽章用的 appsecret、device id 之類），這裡一樣只回名稱、<strong>絕不含值</strong>，
+     * 而且沒有對應的「顯示目前值」端點——secret 這個機制存在的意義就是把明文回到瀏覽器
+     * 的機會降到最低，見 {@code MonitorSecretService} 類別註解。{@code computedFields}
+     * 本身不是機敏資料（只是公式：輸入模板 + 演算法 + 編碼），可以完整回傳。
      */
     public record MonitorSummary(
             Long id,
@@ -287,6 +300,7 @@ public final class AdminDto {
             String method,
             String requestBody,
             boolean hasHeaders,
+            List<String> headerNames,
             List<String> secretNames,
             int intervalSeconds,
             boolean enabled,
@@ -306,15 +320,15 @@ public final class AdminDto {
             Instant createdAt) {
 
         public static MonitorSummary from(ApiMonitor m, String clientId, String clientName,
-                                          List<ExtractRule> extractRules, List<String> secretNames,
-                                          List<ComputedField> computedFields) {
+                                          List<ExtractRule> extractRules, List<String> headerNames,
+                                          List<String> secretNames, List<ComputedField> computedFields) {
             return new MonitorSummary(
                     m.getId(), m.getName(), clientId, clientName, m.getUrl(), hostOf(m.getUrl()), m.getMethod(),
-                    m.getRequestBody(), m.getHeadersCiphertext() != null, secretNames, m.getIntervalSeconds(),
-                    m.isEnabled(), m.getCompareMode(), extractRules, m.getItemPointer(), m.getItemKeyPointer(),
-                    computedFields, m.getMessageTemplate(), m.isNotifyOnFailure(), m.getCooldownSeconds(),
-                    m.getMaxNotificationsPerDay(), m.getConsecutiveFailures(), m.isFailureNotified(),
-                    m.getLastRunAt(), m.getNextRunAt(), m.getCreatedAt());
+                    m.getRequestBody(), m.getHeadersCiphertext() != null, headerNames, secretNames,
+                    m.getIntervalSeconds(), m.isEnabled(), m.getCompareMode(), extractRules, m.getItemPointer(),
+                    m.getItemKeyPointer(), computedFields, m.getMessageTemplate(), m.isNotifyOnFailure(),
+                    m.getCooldownSeconds(), m.getMaxNotificationsPerDay(), m.getConsecutiveFailures(),
+                    m.isFailureNotified(), m.getLastRunAt(), m.getNextRunAt(), m.getCreatedAt());
         }
 
         /** 列表要顯示的是目標 host，不是完整網址（可能帶查詢字串）。解析不出來就顯示 null，前端自行代換。 */
