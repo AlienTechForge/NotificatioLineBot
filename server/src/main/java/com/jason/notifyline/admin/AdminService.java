@@ -816,8 +816,20 @@ public class AdminService {
                 client == null ? null : client.getClientId(),
                 client == null ? "(unknown)" : client.getName(),
                 parseExtractRules(monitor.getExtractRules()),
+                headerNames(monitor),
                 monitorSecretService.listNames(monitor.getId()),
                 parseComputedFields(monitor.getComputedFields()));
+    }
+
+    /**
+     * header 名稱（排序），供列表／編輯抽屜顯示「目前已設定：...」。<strong>只回名稱</strong>
+     * ——見 {@link AdminDto.MonitorSummary} 類別註解。名稱本身沒有另外存一份，只能靠
+     * 解密整份 header JSON 後取 {@code keySet()}：這代表列表每次都要解密一次密文，
+     * 但代價可接受（後台監控清單不會有幾百筆），換來的是使用者不必先按一次「顯示目前值」
+     * 才能確認存檔有沒有生效。
+     */
+    private List<String> headerNames(ApiMonitor monitor) {
+        return decryptHeaders(monitor).keySet().stream().sorted().toList();
     }
 
     private List<ExtractRule> parseExtractRules(String json) {
@@ -948,6 +960,49 @@ public class AdminService {
         String plaintext = objectMapper.writeValueAsString(headers);
         EncryptedSecret encrypted = secretCipher.encrypt(plaintext, HEADERS_AAD_PREFIX + monitor.getId());
         monitor.applyHeaders(encrypted.ciphertext(), encrypted.iv(), encrypted.keyVersion(), now);
+    }
+
+    /**
+     * 監控目前設定的 header 明文，{@code name -> value}。給
+     * {@code GET /admin/api/monitors/{id}/headers} 用——<strong>唯一</strong>會把 header
+     * 值解密回傳的路徑，呼叫端（{@link AdminController}）必須帶
+     * {@code Cache-Control: no-store}，理由跟 {@code /monitors/import}、{@code /monitors/test}
+     * 一樣：內容機敏，不可被瀏覽器或中介的快取留存。沒有設定 header 的監控回空 map，
+     * 不當例外處理——「沒有 header」是正常狀態，不是錯誤。
+     *
+     * @throws ApiException 監控不存在（404）
+     */
+    @Transactional(readOnly = true)
+    public Map<String, String> monitorHeaders(Long id) {
+        return decryptHeaders(requireMonitor(id));
+    }
+
+    /**
+     * 解密 header 密文，{@code name -> value}。跟 {@code ApiMonitorStore.decryptHeaders}
+     * 是同一套邏輯（AAD、JSON 解析），但兩邊各自獨立維護：{@code ApiMonitorStore} 那份是
+     * 排程輪詢的熱路徑，這裡是後台管理端點，沒有共用的必要，硬拆一個共用類別出來換不到
+     * 什麼好處，只是多一層間接。密文為 {@code null}（沒設定過 header）時回空 map。
+     */
+    private Map<String, String> decryptHeaders(ApiMonitor monitor) {
+        byte[] ciphertext = monitor.getHeadersCiphertext();
+        if (ciphertext == null) {
+            return Map.of();
+        }
+        String plaintext = secretCipher.decrypt(
+                ciphertext, monitor.getHeadersIv(), monitor.getHeadersKeyVersion(),
+                HEADERS_AAD_PREFIX + monitor.getId());
+        return parseHeadersJson(plaintext);
+    }
+
+    /** 理由同 {@code ApiMonitorStore#parseHeaders}：JSONB 原文是扁平的字串對字串物件。 */
+    private Map<String, String> parseHeadersJson(String json) {
+        if (json == null || json.isBlank()) {
+            return Map.of();
+        }
+        Map<String, Object> raw = objectMapper.readValue(json, Map.class);
+        Map<String, String> headers = new LinkedHashMap<>();
+        raw.forEach((key, value) -> headers.put(key, value == null ? "" : String.valueOf(value)));
+        return headers;
     }
 
     private URI parseTestUrl(String url) {
