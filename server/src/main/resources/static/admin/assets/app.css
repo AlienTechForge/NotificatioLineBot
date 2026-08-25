@@ -482,6 +482,41 @@ fieldset { border: none; margin: 0; padding: 0; }
 /* chip 附帶「有變動／每次都變」標記時（doc 12 §4.3），讓 tag 跟文字同一行對齊 */
 .diff-chip { display: flex; align-items: center; gap: var(--sp-1); }
 
+/* ---------------------------------------------------------------- 模板變數參考／自動完成（doc 14） */
+
+.var-ref { margin-top: var(--sp-3); }
+.var-ref > summary {
+    cursor: pointer; font-size: 13px; font-weight: 600; color: var(--c-fg-muted);
+    list-style: revert; padding: var(--sp-1) 0;
+}
+.var-ref > summary:hover { color: var(--c-fg); }
+.var-ref__section { margin-top: var(--sp-3); }
+.var-ref__title { font-size: 12.5px; font-weight: 650; margin: 0 0 var(--sp-2); }
+
+/* {{ 自動完成選單：position:fixed 讓它不受 .dialog__body 的 overflow-y:auto 裁切（doc 14 §4.3），
+   且因為是 #monitorDialog 的子節點，仍畫在 <dialog> 的 top layer 裡、蓋在抽屜內容之上。 */
+.var-menu {
+    position: fixed;
+    z-index: 70;
+    min-width: 260px;
+    max-width: min(420px, calc(100vw - 16px));
+    max-height: 280px;
+    overflow-y: auto;
+    background: var(--c-surface-solid);
+    border: 1px solid var(--c-border-strong);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-lg);
+    padding: var(--sp-1);
+}
+.var-menu__option {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+.var-menu__option:hover, .var-menu__option.is-active { background: var(--c-primary-soft); }
+.var-menu__var { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; color: var(--c-fg); }
+.var-menu__desc { font-size: 11.5px; color: var(--c-fg-muted); }
+
 /* ---------------------------------------------------------------- 欄位展開樹（doc 12 §4.2） */
 
 .json-tree { margin-top: var(--sp-2); }
