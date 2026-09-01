@@ -12,6 +12,7 @@ import com.jason.notifyline.monitor.domain.CompareMode;
 import com.jason.notifyline.monitor.domain.ComputedField;
 import com.jason.notifyline.monitor.domain.ExtractRule;
 import com.jason.notifyline.monitor.session.SiteSession;
+import com.jason.notifyline.notification.api.NotificationDetail;
 import com.jason.notifyline.notification.domain.Notification;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -180,6 +181,9 @@ public final class AdminDto {
      *
      * @param scheduledAt null = 這是一則立即發送的通知；非 null = 排程，
      *                    值是預計派送器取件的時間
+     * @param preview     發送內容的單行節錄（見 {@link NotificationPayloadReader#preview}）。
+     *                    null = 內容已清空或解析不出來 —— 列表只有一欄的寬度，
+     *                    「為什麼看不到」由明細對話框的 {@link NotificationContent} 說明
      */
     public record NotificationSummary(
             String notificationId,
@@ -191,9 +195,10 @@ public final class AdminDto {
             int failureCount,
             Instant createdAt,
             Instant finishedAt,
-            Instant scheduledAt) {
+            Instant scheduledAt,
+            String preview) {
 
-        public static NotificationSummary from(Notification n, String clientName) {
+        public static NotificationSummary from(Notification n, String clientName, String preview) {
             return new NotificationSummary(
                     n.getId().toString(),
                     clientName,
@@ -204,8 +209,114 @@ public final class AdminDto {
                     n.getFailureCount(),
                     n.getCreatedAt(),
                     n.getFinishedAt(),
-                    n.getScheduledAt());
+                    n.getScheduledAt(),
+                    preview);
         }
+    }
+
+    /**
+     * 後台的發送明細：{@link NotificationDetail} 的全部欄位，外加<strong>發送內容</strong>
+     * 與憑證名稱。
+     *
+     * <p>為什麼不直接把內容加進 {@link NotificationDetail}：那是
+     * {@code GET /api/v1/notifications/{id}} 的公開契約（見
+     * {@code Docs/plan/05-API契約.md} §3），呼叫端拿得到的東西應該只增加在它真的
+     * 需要的時候。後台是另一個對象、另一條認證路徑，多回一份內容是後台自己的決定，
+     * 不該順手改動對外的 API 形狀。
+     */
+    public record NotificationDetailView(
+            String notificationId,
+            String clientName,
+            String targetType,
+            String status,
+            int recipientCount,
+            int successCount,
+            int failureCount,
+            Instant createdAt,
+            Instant startedAt,
+            Instant finishedAt,
+            Instant scheduledAt,
+            NotificationContent content,
+            List<NotificationDetail.Batch> batches) {
+
+        public static NotificationDetailView from(Notification n,
+                                                  String clientName,
+                                                  NotificationContent content,
+                                                  NotificationDetail detail) {
+            return new NotificationDetailView(
+                    n.getId().toString(),
+                    clientName,
+                    detail.targetType(),
+                    detail.status(),
+                    detail.recipientCount(),
+                    detail.successCount(),
+                    detail.failureCount(),
+                    detail.createdAt(),
+                    detail.startedAt(),
+                    detail.finishedAt(),
+                    n.getScheduledAt(),
+                    content,
+                    detail.batches());
+        }
+    }
+
+    /**
+     * 一則通知實際送出的內容。內容從 {@code notification.payload} 還原，格式見
+     * {@code PayloadEnvelope}。
+     *
+     * @param status              內容為何看得到／看不到，見 {@link ContentStatus}
+     * @param notificationDisabled 送出時是否關掉了使用者裝置的推播提示
+     * @param messages            送給 LINE 的 message objects，依原本的順序。
+     *                            {@code status != AVAILABLE} 時為空清單
+     */
+    public record NotificationContent(
+            ContentStatus status,
+            boolean notificationDisabled,
+            List<NotificationMessage> messages) {
+
+        public static NotificationContent of(boolean notificationDisabled,
+                                             List<NotificationMessage> messages) {
+            return new NotificationContent(ContentStatus.AVAILABLE, notificationDisabled, messages);
+        }
+
+        public static NotificationContent cleared() {
+            return new NotificationContent(ContentStatus.CLEARED, false, List.of());
+        }
+
+        public static NotificationContent unreadable() {
+            return new NotificationContent(ContentStatus.UNREADABLE, false, List.of());
+        }
+
+        public boolean available() {
+            return status == ContentStatus.AVAILABLE;
+        }
+    }
+
+    /** {@link NotificationContent} 的三種狀態。前端據此決定要顯示內容還是顯示原因。 */
+    public enum ContentStatus {
+
+        /** 內容還在，{@code messages} 可用。 */
+        AVAILABLE,
+
+        /**
+         * 內容已被清空：呼叫端指定 {@code persistPayload=false}（送完即清），
+         * 或已過 90 天保留期。不是錯誤，是設計上的行為。
+         */
+        CLEARED,
+
+        /** payload 存在但解析不出來（格式與現行信封對不起來）。其餘欄位仍然可信。 */
+        UNREADABLE
+    }
+
+    /**
+     * 一則 LINE message object 的後台視圖。
+     *
+     * @param index 在 {@code messages} 陣列中的位置，從 0 起算
+     * @param type  message object 的 {@code type}（{@code text}、{@code flex}…）
+     * @param text  文字訊息的內文；其他型別為 null —— 那些沒有單一「內文」可言
+     * @param json  該則訊息完整的格式化 JSON。文字以外的型別只有這裡看得出全貌
+     */
+    public record NotificationMessage(int index, String type, String text, String json) {
     }
 
     /** 儀表板統計。 */

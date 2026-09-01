@@ -3,7 +3,6 @@ package com.jason.notifyline.admin;
 import com.jason.notifyline.common.ApiResponse;
 import com.jason.notifyline.monitor.importer.ImportedRequest;
 import com.jason.notifyline.notification.api.NotificationAccepted;
-import com.jason.notifyline.notification.api.NotificationDetail;
 import jakarta.validation.Valid;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
@@ -115,14 +114,27 @@ public class AdminController {
 
     // ------------------------------------------------------------ 發送紀錄
 
+    /**
+     * 最近的發送紀錄，每列附一段內容節錄。
+     *
+     * <p>回應帶 {@code Cache-Control: no-store}：從這個版本起它含<strong>發送內容</strong>，
+     * 而通知內容是使用者實際收到的訊息（驗證碼、對帳金額之類都可能在裡面）。理由與
+     * {@link #importMonitor} 相同——不可被瀏覽器或中介的快取留存。
+     */
     @GetMapping("/notifications")
-    public ApiResponse<List<AdminDto.NotificationSummary>> recentNotifications() {
-        return ApiResponse.ok(adminService.recentNotifications());
+    public ResponseEntity<ApiResponse<List<AdminDto.NotificationSummary>>> recentNotifications() {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(ApiResponse.ok(adminService.recentNotifications()));
     }
 
+    /** 單筆明細，含完整發送內容。{@code no-store} 的理由同 {@link #recentNotifications}。 */
     @GetMapping("/notifications/{id}")
-    public ApiResponse<NotificationDetail> notificationDetail(@PathVariable UUID id) {
-        return ApiResponse.ok(adminService.notificationDetail(id));
+    public ResponseEntity<ApiResponse<AdminDto.NotificationDetailView>> notificationDetail(
+            @PathVariable UUID id) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(ApiResponse.ok(adminService.notificationDetail(id)));
     }
 
     // -------------------------------------------------------------- 排程
