@@ -372,6 +372,13 @@ table.grid { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .cell-mono { font-family: var(--font-mono); font-size: 12px; color: var(--c-fg-muted); overflow-wrap: anywhere; }
 .row-actions { display: flex; gap: var(--sp-2); justify-content: flex-end; }
 
+/* 發送紀錄的「內容」欄：一列只給一行，超出的截斷。全文在明細對話框，
+   這裡若讓它換行，長訊息會把整張表拉成幾十列高而失去「一覽」的意義。 */
+.cell-preview {
+    max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cell-preview--empty { color: var(--c-fg-muted); }
+
 /* ---------------------------------------------------------------- 標籤 */
 
 .tag {
@@ -483,6 +490,35 @@ fieldset { border: none; margin: 0; padding: 0; }
 
 /* chip 附帶「有變動／每次都變」標記時（doc 12 §4.3），讓 tag 跟文字同一行對齊 */
 .diff-chip { display: flex; align-items: center; gap: var(--sp-1); }
+
+/* ------------------------------------------------- 發送明細的「發送內容」 */
+
+.detail-content { margin: var(--sp-4) 0; }
+.detail-section { margin: var(--sp-5) 0 var(--sp-2); }
+
+.msg {
+    border: 1px solid var(--c-border); border-radius: var(--radius-sm);
+    padding: var(--sp-3); margin-bottom: var(--sp-3); background: var(--c-surface);
+}
+.msg:last-child { margin-bottom: 0; }
+.msg__head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: var(--sp-2); margin-bottom: var(--sp-2);
+}
+.msg__raw { margin-top: var(--sp-2); }
+.msg__raw > summary {
+    cursor: pointer; font-size: 12px; color: var(--c-fg-muted); user-select: none;
+}
+.msg__raw > summary:hover { color: var(--c-fg); }
+
+.code-block {
+    margin: var(--sp-2) 0 0; padding: var(--sp-3);
+    background: var(--c-surface-2); border: 1px solid var(--c-border);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 320px; overflow: auto;
+}
 
 /* ---------------------------------------------------------------- 模板變數參考／自動完成（doc 14） */
 

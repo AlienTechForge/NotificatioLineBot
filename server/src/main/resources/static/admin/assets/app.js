@@ -501,10 +501,19 @@
         tr.append(td(fmtTime(n.createdAt)));
         tr.append(td(n.clientName));
         const t = el('td'); t.append(el('span', 'tag tag--target', TARGET_LABEL[n.targetType] || n.targetType)); tr.append(t);
+        tr.append(previewCell(n.preview));
         const s = el('td'); s.append(el('span', 'tag ' + (NOTIF_TAG[n.status] || 'tag--muted'), n.status)); tr.append(s);
         tr.append(tdNum(n.recipientCount));
         tr.append(tdNum(`${n.successCount} / ${n.failureCount}`));
         return tr;
+    }
+
+    /** 內容節錄。null = 內容已清空或解析不出來 —— 原因由明細對話框說明，一列的寬度放不下。 */
+    function previewCell(preview) {
+        if (!preview) return el('td', 'cell-preview cell-preview--empty', '—');
+        const cell = el('td', 'cell-preview', preview);
+        cell.title = preview; // CSS 會把過長的節錄截成一行，滑鼠移上去看得到全部
+        return cell;
     }
 
     async function openDetail(n) {
@@ -518,6 +527,12 @@
         } catch (e) { body.replaceChildren(el('div', 'notice notice--error', e.message)); }
     }
 
+    /** 內容看不到時的說明。鍵對應後端的 AdminDto.ContentStatus。 */
+    const CONTENT_UNAVAILABLE = {
+        CLEARED: '內容未保存：這則通知指定了 persistPayload=false（送出後即清空），或已過 90 天保留期。其餘欄位仍然有效。',
+        UNREADABLE: '內容無法解析：儲存的格式與現行的訊息信封對不起來。其餘欄位仍然有效。',
+    };
+
     function renderDetail(d) {
         const body = $('detailBody');
         body.replaceChildren();
@@ -526,6 +541,9 @@
         summary.textContent = `狀態 ${d.status}｜收件 ${d.recipientCount}｜成功 ${d.successCount}｜失敗 ${d.failureCount}`;
         body.append(summary);
 
+        body.append(renderDetailContent(d.content));
+
+        body.append(el('p', 'fieldset-label detail-section', '批次'));
         const table = el('table', 'grid');
         const thead = el('thead');
         const htr = el('tr');
@@ -544,6 +562,76 @@
         });
         table.append(tb);
         const wrap = el('div', 'table-wrap'); wrap.append(table); body.append(wrap);
+    }
+
+    /**
+     * 發送內容區塊：這則通知實際送出去的訊息。
+     *
+     * <p>文字訊息直接顯示內文（那是收件人看到的東西）；其餘型別（flex、template…）
+     * 沒有單一「內文」可言，只有原始 message object 看得出全貌，所以那些預設展開 JSON。
+     */
+    function renderDetailContent(content) {
+        const section = el('section', 'detail-content');
+        const head = el('div', 'field-row-between');
+        head.append(el('p', 'fieldset-label', '發送內容'));
+        if (content && content.status === 'AVAILABLE' && content.notificationDisabled) {
+            head.append(el('span', 'tag tag--muted', '靜音發送'));
+        }
+        section.append(head);
+
+        if (!content) {
+            section.append(el('div', 'notice notice--warning', '這筆紀錄沒有內容欄位。'));
+            return section;
+        }
+        if (content.status !== 'AVAILABLE') {
+            section.append(el('div', 'notice notice--warning',
+                CONTENT_UNAVAILABLE[content.status] || '內容無法顯示。'));
+            return section;
+        }
+        if (!content.messages || content.messages.length === 0) {
+            section.append(el('div', 'notice notice--warning', '這則通知沒有任何訊息物件。'));
+            return section;
+        }
+
+        content.messages.forEach((m) => section.append(messageBlock(m, content.messages.length)));
+        return section;
+    }
+
+    function messageBlock(message, total) {
+        // text 只有文字訊息有（後端保證：其他型別一律 null）
+        const hasText = message.text !== null && message.text !== undefined;
+        const box = el('div', 'msg');
+
+        const head = el('div', 'msg__head');
+        head.append(el('span', 'tag tag--muted',
+            total > 1 ? `第 ${message.index + 1} 則 · ${message.type}` : message.type));
+        head.append(copyBtn(hasText ? message.text : message.json));
+        box.append(head);
+
+        if (hasText) {
+            box.append(el('pre', 'test-message', message.text));
+        }
+
+        // 文字訊息的 JSON 是補充資料，預設收起來；其他型別的 JSON 就是內容本身，預設展開
+        const raw = document.createElement('details');
+        raw.className = 'msg__raw';
+        raw.open = !hasText;
+        const summary = document.createElement('summary');
+        summary.textContent = '原始 message object';
+        raw.append(summary);
+        raw.append(el('pre', 'code-block', message.json));
+        box.append(raw);
+
+        return box;
+    }
+
+    function copyBtn(text) {
+        const btn = el('button', 'btn btn--ghost btn--sm', '複製');
+        btn.type = 'button';
+        btn.addEventListener('click', () => navigator.clipboard.writeText(text).then(
+            () => toast('已複製'),
+            () => toast('複製失敗，請手動選取', true)));
+        return btn;
     }
 
     // ============================================================ 使用者

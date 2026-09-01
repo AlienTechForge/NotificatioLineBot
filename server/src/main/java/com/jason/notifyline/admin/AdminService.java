@@ -131,6 +131,7 @@ public class AdminService {
     private final MonitorSecretService monitorSecretService;
     private final ComputedFieldEvaluator computedFieldEvaluator;
     private final ComputedFieldValidator computedFieldValidator;
+    private final NotificationPayloadReader payloadReader;
 
     public AdminService(ClientRepository clients,
                         ClientService clientService,
@@ -154,7 +155,8 @@ public class AdminService {
                         SiteSessionService siteSessionService,
                         MonitorSecretService monitorSecretService,
                         ComputedFieldEvaluator computedFieldEvaluator,
-                        ComputedFieldValidator computedFieldValidator) {
+                        ComputedFieldValidator computedFieldValidator,
+                        NotificationPayloadReader payloadReader) {
         this.clients = clients;
         this.clientService = clientService;
         this.lineUsers = lineUsers;
@@ -178,6 +180,7 @@ public class AdminService {
         this.monitorSecretService = monitorSecretService;
         this.computedFieldEvaluator = computedFieldEvaluator;
         this.computedFieldValidator = computedFieldValidator;
+        this.payloadReader = payloadReader;
     }
 
     // ------------------------------------------------------------ 儀表板
@@ -409,6 +412,10 @@ public class AdminService {
 
     // ------------------------------------------------------------ 發送紀錄
 
+    /**
+     * 最近的發送紀錄，每列附一段內容節錄 —— 沒有內容的清單只答得出「發過幾次」，
+     * 答不出「發了什麼」，而後者才是查紀錄的人真正在找的東西。
+     */
     @Transactional(readOnly = true)
     public List<AdminDto.NotificationSummary> recentNotifications() {
         Map<Long, String> clientNames = clients.findAll().stream()
@@ -416,16 +423,34 @@ public class AdminService {
 
         return notifications.findAllByOrderByCreatedAtDesc(Limit.of(RECENT_LIMIT)).stream()
                 .map(n -> AdminDto.NotificationSummary.from(
-                        n, clientNames.getOrDefault(n.getClientId(), "(unknown)")))
+                        n,
+                        clientNames.getOrDefault(n.getClientId(), "(unknown)"),
+                        payloadReader.preview(n.getPayload())))
                 .toList();
     }
 
+    /**
+     * 單筆發送明細，含<strong>完整的發送內容</strong>（見
+     * {@link AdminDto.NotificationDetailView}）。
+     *
+     * <p>內容可能看不到（已清空或解析不出來），那時 {@code content.status} 會說明原因，
+     * 其餘欄位照常回傳 —— 見 {@link NotificationPayloadReader} 類別註解。
+     */
     @Transactional(readOnly = true)
-    public NotificationDetail notificationDetail(UUID id) {
+    public AdminDto.NotificationDetailView notificationDetail(UUID id) {
         Notification notification = notifications.findById(id)
                 .orElseThrow(() -> new ApiException(ErrorCode.NOT_FOUND, "Notification not found."));
-        return NotificationDetail.from(
+
+        NotificationDetail detail = NotificationDetail.from(
                 notification, deliveries.findByNotificationIdOrderByBatchNo(id));
+
+        return AdminDto.NotificationDetailView.from(
+                notification,
+                clients.findById(notification.getClientId())
+                        .map(Client::getName)
+                        .orElse("(unknown)"),
+                payloadReader.read(notification.getPayload()),
+                detail);
     }
 
     // ------------------------------------------------------------------ 監控

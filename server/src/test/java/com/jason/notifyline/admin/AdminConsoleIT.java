@@ -28,6 +28,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -428,6 +429,90 @@ class AdminConsoleIT extends PostgresIntegrationTest {
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.data.status").value("QUEUED"))
                 .andExpect(jsonPath("$.data.recipientCount").value(1));
+    }
+
+    // ------------------------------------------------------- 發送紀錄的內容
+
+    @Test
+    @DisplayName("發送紀錄列表帶內容節錄：title 與 text 都看得到，換行壓成空白")
+    void historyListShowsPreview() throws Exception {
+        setOwnerDefaultTarget();
+        mockMvc.perform(post("/admin/api/notifications/test")
+                .with(admin()).with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"clientId\":\"" + clientId
+                        + "\",\"title\":\"部署完成\",\"text\":\"版本 1.2.3\"}"));
+
+        mockMvc.perform(get("/admin/api/notifications").with(admin()))
+                .andExpect(status().isOk())
+                // 內容是使用者實際收到的訊息，不可被快取留存
+                .andExpect(header().string("Cache-Control", org.hamcrest.Matchers.containsString("no-store")))
+                .andExpect(jsonPath("$.data[0].preview").value("部署完成 版本 1.2.3"));
+    }
+
+    @Test
+    @DisplayName("發送明細帶完整內容：文字訊息回內文與原始 message object")
+    void detailShowsContent() throws Exception {
+        setOwnerDefaultTarget();
+        String id = idOf(mockMvc.perform(post("/admin/api/notifications/test")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"clientId\":\"" + clientId
+                                + "\",\"title\":\"部署完成\",\"text\":\"版本 1.2.3\"}"))
+                .andReturn().getResponse().getContentAsString());
+
+        mockMvc.perform(get("/admin/api/notifications/{id}", id).with(admin()))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", org.hamcrest.Matchers.containsString("no-store")))
+                .andExpect(jsonPath("$.data.clientName").value("svc"))
+                .andExpect(jsonPath("$.data.content.status").value("AVAILABLE"))
+                .andExpect(jsonPath("$.data.content.notificationDisabled").value(false))
+                .andExpect(jsonPath("$.data.content.messages.length()").value(1))
+                .andExpect(jsonPath("$.data.content.messages[0].type").value("text"))
+                // title 渲染成首行，與實際送給 LINE 的內容一致（見 MessageAssembler）
+                .andExpect(jsonPath("$.data.content.messages[0].text").value("部署完成\n版本 1.2.3"))
+                .andExpect(jsonPath("$.data.content.messages[0].json").isNotEmpty());
+    }
+
+    @Test
+    @DisplayName("內容被清空的紀錄：其餘欄位照常，content 說明原因而不是報錯")
+    void detailWithClearedPayload() throws Exception {
+        setOwnerDefaultTarget();
+        String id = idOf(mockMvc.perform(post("/admin/api/notifications/test")
+                        .with(admin()).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"clientId\":\"" + clientId + "\",\"text\":\"會被清掉\"}"))
+                .andReturn().getResponse().getContentAsString());
+
+        // 模擬 persistPayload=false 送完即清，或過了 90 天保留期被清空
+        var notification = notifications.findById(java.util.UUID.fromString(id)).orElseThrow();
+        notification.clearPayload();
+        notifications.save(notification);
+
+        mockMvc.perform(get("/admin/api/notifications/{id}", id).with(admin()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.content.status").value("CLEARED"))
+                .andExpect(jsonPath("$.data.content.messages").isEmpty())
+                .andExpect(jsonPath("$.data.recipientCount").value(1));
+
+        mockMvc.perform(get("/admin/api/notifications").with(admin()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].preview").doesNotExist());
+    }
+
+    @Test
+    @DisplayName("發送明細未登入 → 401（內容不會外流給沒登入的人）")
+    void detailRequiresAuth() throws Exception {
+        mockMvc.perform(get("/admin/api/notifications/{id}", java.util.UUID.randomUUID()))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    @DisplayName("查不存在的發送明細 → 404")
+    void detailUnknownNotification() throws Exception {
+        mockMvc.perform(get("/admin/api/notifications/{id}", java.util.UUID.randomUUID())
+                        .with(admin()))
+                .andExpect(status().isNotFound());
     }
 
     @Test
