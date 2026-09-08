@@ -183,7 +183,10 @@ public class ApiMonitorStore {
                     // 交易之外，不能拿著密文或 entity 到處傳，claim() 這個短交易裡先把
                     // 明文快照下來。
                     monitorSecretService.decryptAll(monitor.getId()),
-                    parseComputedFields(monitor.getComputedFields())));
+                    parseComputedFields(monitor.getComputedFields()),
+                    // W16：只帶 id。token 有壽命，取件與實際送出之間隔著租約與排隊時間，
+                    // 在這裡先換好的 token 到了要用時可能已經過期——見 ClaimedMonitor#loginId。
+                    monitor.getLoginId()));
         }
         return claimed;
     }

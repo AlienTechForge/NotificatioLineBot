@@ -47,6 +47,10 @@
                     <span class="nav__ico"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 20V10M18 20V4M6 20v-4"/></svg></span>
                     <span class="label">監控</span>
                 </a>
+                <a href="#logins" data-view="logins">
+                    <span class="nav__ico"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M15 7h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h3M12 3v9m0 0l-2.5-2.5M12 12l2.5-2.5"/></svg></span>
+                    <span class="label">站台登入</span>
+                </a>
                 <a href="#sessions" data-view="sessions">
                     <span class="nav__ico"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span>
                     <span class="label">登入狀態</span>
@@ -243,6 +247,28 @@
             </section>
 
             <!-- 登入狀態 -->
+            <!-- 站台登入（doc 15）：帳密登入取得短效 token，供監控自動使用 -->
+            <section class="view" id="view-logins" aria-label="站台登入" hidden>
+                <div class="card">
+                    <div class="card__head">
+                        <div><h2>站台登入</h2><p>用帳號密碼自動登入目標站台、取得短效 token。適合 token 只活一小時、手動貼會過期的站台</p></div>
+                        <button type="button" class="btn btn--sm btn--primary" id="addLogin">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                            新增登入
+                        </button>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="grid">
+                            <thead><tr>
+                                <th>名稱</th><th>帳號</th><th>Token 狀態</th><th class="num">使用中</th><th>最後登入</th><th>狀態</th><th><span class="visually-hidden">操作</span></th>
+                            </tr></thead>
+                            <tbody id="loginRows"></tbody>
+                        </table>
+                    </div>
+                    <div id="loginsEmpty" class="empty" hidden>還沒有任何站台登入。目標站台的 token 會過期時才需要建立。</div>
+                </div>
+            </section>
+
             <section class="view" id="view-sessions" aria-label="登入狀態" hidden>
                 <div class="card">
                     <div class="card__head">
@@ -345,210 +371,293 @@
     <div class="dialog__foot"><button type="button" class="btn btn--primary" id="detailClose">關閉</button></div>
 </dialog>
 
-<!-- 新增/編輯監控 -->
+<!-- 新增/編輯監控
+     欄位分組見 Docs/plan/15-監控站台登入設計.md §9：相關欄位包進 .form-section，
+     少數人才用得到的（簽章、防洗版）用 <details> 收起來。所有 id 保持不變。 -->
 <dialog id="monitorDialog" class="dialog--wide" aria-labelledby="monitorTitle">
     <form method="dialog" id="monitorForm">
         <div class="dialog__head"><h3 id="monitorTitle">新增監控</h3></div>
         <div class="dialog__body">
             <div id="monitorError" class="notice notice--error" role="alert" hidden></div>
 
-            <div class="field">
-                <p class="fieldset-label">貼上匯入（cURL / fetch / 自訂 JSON）</p>
-                <textarea id="monImportRaw" rows="5" placeholder="從瀏覽器開發者工具的網路面板貼上，或貼上自訂 JSON 設定…"></textarea>
-                <p class="hint">要帶登入狀態請用 Chrome 的「Copy as cURL (bash)」——「Copy as fetch」不含 cookie。cookie 是瀏覽器自行附加的
-                    forbidden header，不會出現在複製出來的字串裡；貼了「Copy as fetch」的內容會一直 401，不是設定壞了。
-                    貼上的內容含 cookie 時會自動存進「登入狀態」頁，不會留在這個監控自己的 header 裡。</p>
-                <div id="monImportError" class="notice notice--error" role="alert" hidden></div>
-                <div style="display:flex; gap:var(--sp-2); flex-wrap:wrap; margin-top:var(--sp-2)">
-                    <button type="button" class="btn btn--sm btn--primary" id="monImportBtn">
-                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
-                        解析並帶入
-                    </button>
-                    <button type="button" class="btn btn--sm btn--ghost" id="monCopySchemaBtn">
-                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="1"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/></svg>
-                        複製自訂 JSON 格式
-                    </button>
+            <!-- 1 ─ 大多數人從這裡開始：貼上就自動填好下面大半欄位 -->
+            <section class="form-section">
+                <div class="form-section__head">
+                    <h4 class="form-section__title"><span class="form-section__num">1</span>從瀏覽器貼上</h4>
+                    <p class="form-section__desc">貼上開發者工具複製的請求，下面的網址、方法、header 會自動填好。也可以略過，全部手動填。</p>
                 </div>
-                <p class="hint">自訂 JSON 格式可以直接拿去餵給 AI，請它照這個 schema 產生一份可匯入的設定。</p>
-            </div>
 
-            <div class="form-row">
                 <div class="field">
-                    <label for="monName">名稱</label>
-                    <input type="text" id="monName" required maxlength="100" placeholder="例如：訂單狀態監控">
+                    <label for="monImportRaw">cURL / fetch / 自訂 JSON</label>
+                    <textarea id="monImportRaw" rows="4" placeholder="從瀏覽器開發者工具的網路面板貼上，或貼上自訂 JSON 設定…"></textarea>
+                    <p class="hint">要帶登入狀態請用 Chrome 的「Copy as cURL (bash)」。</p>
+                    <details class="hint-more">
+                        <summary>為什麼不能用「Copy as fetch」</summary>
+                        <p class="hint">cookie 是瀏覽器自行附加的 forbidden header，不會出現在 fetch 複製出來的字串裡。貼了會一直 401，不是設定壞了。貼上的內容含 cookie 時會自動存進「登入狀態」頁，不會留在這個監控自己的 header 裡。</p>
+                    </details>
+                    <div id="monImportError" class="notice notice--error" role="alert" hidden></div>
+                    <div style="display:flex; gap:var(--sp-2); flex-wrap:wrap; margin-top:var(--sp-3)">
+                        <button type="button" class="btn btn--sm btn--primary" id="monImportBtn">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+                            解析並帶入
+                        </button>
+                        <button type="button" class="btn btn--sm btn--ghost" id="monCopySchemaBtn">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="1"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/></svg>
+                            複製自訂 JSON 格式
+                        </button>
+                    </div>
+                    <p class="hint">自訂 JSON 格式可直接餵給 AI，請它照這個 schema 產生一份可匯入的設定。</p>
                 </div>
-                <div class="field">
-                    <label for="monClient">以哪組憑證通知</label>
-                    <select id="monClient" required></select>
-                </div>
-            </div>
+            </section>
 
-            <div class="form-row">
-                <div class="field">
-                    <label for="monMethod">方法</label>
-                    <select id="monMethod">
-                        <option value="GET">GET</option>
-                        <option value="POST">POST</option>
-                    </select>
+            <!-- 2 ─ 這個監控叫什麼、多久跑一次、用誰的名義通知 -->
+            <section class="form-section">
+                <div class="form-section__head">
+                    <h4 class="form-section__title"><span class="form-section__num">2</span>基本設定</h4>
                 </div>
+
+                <div class="form-row">
+                    <div class="field">
+                        <label for="monName">名稱</label>
+                        <input type="text" id="monName" required maxlength="100" placeholder="例如：訂單狀態監控">
+                    </div>
+                    <div class="field">
+                        <label for="monClient">以哪組憑證通知</label>
+                        <select id="monClient" required></select>
+                    </div>
+                </div>
+
                 <div class="field">
                     <label for="monInterval">間隔秒數</label>
                     <input type="number" id="monInterval" min="30" step="1" required placeholder="60">
-                    <p class="hint">實際下限依伺服器設定（app.monitor.min-interval）而定，太低會在儲存時被拒絕。</p>
+                    <p class="hint">實際下限依伺服器設定而定，太低會在儲存時被拒絕。</p>
                 </div>
-            </div>
+            </section>
 
-            <div class="field">
-                <label for="monUrl">目標網址</label>
-                <input type="text" id="monUrl" required placeholder="https://example.com/api/status">
-                <p class="hint">只允許 https，且不可指向內網位址（伺服器端強制檢查）。</p>
-            </div>
-
-            <div class="field" id="monBodyField" hidden>
-                <label for="monBody">request body（選填，POST 用）</label>
-                <textarea id="monBody" placeholder="{&quot;query&quot;:&quot;...&quot;}"></textarea>
-            </div>
-
-            <div class="field">
-                <label for="monHeaders">自訂 header（JSON，選填）</label>
-                <div class="field-row-between" id="monHeadersCurrentRow" hidden>
-                    <p class="hint" id="monHeadersCurrent"></p>
-                    <button type="button" class="btn btn--sm btn--ghost" id="monHeadersShowBtn" hidden>
-                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                        顯示目前值
-                    </button>
+            <!-- 3 ─ 目標請求本身 -->
+            <section class="form-section">
+                <div class="form-section__head">
+                    <h4 class="form-section__title"><span class="form-section__num">3</span>要抓哪個 API</h4>
                 </div>
-                <textarea id="monHeaders" placeholder='{"Authorization":"Bearer xxx"}'></textarea>
-                <p class="hint" id="monHeadersHint">格式：扁平的字串對字串 JSON 物件。可用 <code>{{computed.NAME}}</code> 引用下面的計算欄位。留空 = 不變更既有 header。</p>
-            </div>
 
-            <div class="field">
-                <p class="fieldset-label">密鑰（signing secret，例如 appsecret、device id）</p>
-                <p class="hint">計算欄位用 <code>{{secret.NAME}}</code> 引用。值加密儲存，後台只顯示名稱與「已設定」，絕不顯示值。</p>
-                <div id="monSecretsExisting"></div>
-                <div id="monSecretsNewRows"></div>
-                <button type="button" class="btn btn--sm" id="monAddSecret" style="margin-top:var(--sp-2)">
-                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-                    新增密鑰
-                </button>
-            </div>
-
-            <div class="field">
-                <p class="fieldset-label">計算欄位（依序求值，可串接多段雜湊）</p>
-                <p class="hint">每個欄位的 <code>steps</code> 依序套用，前一段的輸出字串就是後一段的輸入——這是雙重雜湊
-                    （例如 <code>MD5(MD5(x).toUpperCase()).toUpperCase()</code>）能表示的原因。輸入可用
-                    <code>{{secret.NAME}}</code>、<code>{{now.epochSeconds}}</code>、<code>{{uuid}}</code>，以及
-                    <strong>更早</strong>定義的 <code>{{computed.NAME}}</code>；模板（URL/header/body）用
-                    <code>{{computed.NAME}}</code> 引用求出的值。</p>
-                <div id="monComputedRows"></div>
-                <button type="button" class="btn btn--sm" id="monAddComputedField" style="margin-top:var(--sp-2)">
-                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-                    新增計算欄位
-                </button>
-            </div>
-
-            <div class="field">
-                <label for="monCompareMode">比對模式</label>
-                <select id="monCompareMode">
-                    <option value="WHOLE_BODY">WHOLE_BODY（整包比對）</option>
-                    <option value="EXTRACTED">EXTRACTED（比對指定欄位）</option>
-                    <option value="NEW_ITEMS">NEW_ITEMS（只通知新項目）</option>
-                </select>
-            </div>
-
-            <div class="field">
-                <p class="fieldset-label">抽取欄位（JsonPointer，模板用 <code>{{value.NAME}}</code> 引用）</p>
-                <div id="monRulesRows"></div>
-                <button type="button" class="btn btn--sm" id="monAddRule" style="margin-top:var(--sp-2)">
-                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-                    新增欄位
-                </button>
-            </div>
-
-            <div id="monItemPointerField" hidden>
                 <div class="form-row">
                     <div class="field">
-                        <label for="monItemPointer">項目陣列位置（item_pointer）</label>
-                        <input type="text" id="monItemPointer" placeholder="/data/items">
+                        <label for="monMethod">方法</label>
+                        <select id="monMethod">
+                            <option value="GET">GET</option>
+                            <option value="POST">POST</option>
+                        </select>
                     </div>
                     <div class="field">
-                        <label for="monItemKeyPointer">項目鍵位置（item_key_pointer，相對於每個項目）</label>
-                        <input type="text" id="monItemKeyPointer" placeholder="/id">
+                        <label for="monUrl">目標網址</label>
+                        <input type="text" id="monUrl" required placeholder="https://example.com/api/status">
+                        <p class="hint">只允許 https，不可指向內網位址。</p>
                     </div>
                 </div>
-                <p class="hint">上面的抽取欄位在此模式下相對於<strong>每個項目</strong>解讀，模板用 <code>{{item.NAME}}</code> 引用。</p>
-            </div>
 
-            <div class="field">
-                <label for="monTemplate">訊息模板</label>
-                <textarea id="monTemplate" required placeholder="監控「{{monitor.name}}」狀態變成 {{value.status}}（原本 {{old.status}}）"></textarea>
-                <p class="hint">輸入 <code>{{</code> 會跳出可用變數清單（<code>Ctrl+Space</code> 手動叫出），依打字內容即時過濾。</p>
-                <details class="var-ref">
-                    <summary>完整變數對照表</summary>
-                    <div class="var-ref__section">
-                        <p class="var-ref__title">訊息模板（monTemplate）</p>
-                        <div class="table-wrap">
-                            <table class="grid">
-                                <thead><tr><th>變數</th><th>意義</th><th>何時有值</th></tr></thead>
-                                <tbody>
-                                    <tr><td><code>{{value.欄位}}</code></td><td>本次抓到的值</td><td>一律</td></tr>
-                                    <tr><td><code>{{old.欄位}}</code></td><td>上一次的值</td><td>僅正式通知。試算一律 —</td></tr>
-                                    <tr><td><code>{{item.欄位}}</code></td><td>該筆新項目的欄位</td><td>僅 NEW_ITEMS 模式，逐筆渲染時</td></tr>
-                                    <tr><td><code>{{monitor.name}}</code></td><td>監控名稱</td><td>一律</td></tr>
-                                    <tr><td><code>{{now}}</code></td><td>現在時間 MM/dd HH:mm（台北）</td><td>一律</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-                        <p class="hint">打錯 → —（不原樣輸出）；值為 null → —；渲染後截到 4500 字；<code>NEW_ITEMS</code> 每筆各渲染一次，最多 20 筆。</p>
-                    </div>
-                    <div class="var-ref__section">
-                        <p class="var-ref__title">請求模板（monUrl／monHeaders／monBody）</p>
-                        <div class="table-wrap">
-                            <table class="grid">
-                                <thead><tr><th>變數</th><th>產出</th></tr></thead>
-                                <tbody>
-                                    <tr><td><code>{{now.epochSeconds}}</code></td><td>Unix 秒</td></tr>
-                                    <tr><td><code>{{now.epochMillis}}</code></td><td>Unix 毫秒</td></tr>
-                                    <tr><td><code>{{now.iso8601}}</code></td><td>2026-08-24T03:00:00Z（UTC，秒精度）</td></tr>
-                                    <tr><td><code>{{now.format:PATTERN}}</code></td><td>自訂格式，台北時區</td></tr>
-                                    <tr><td><code>{{now±N[smhd].…}}</code></td><td>位移，例如 <code>{{now-7d.format:yyyy-MM-dd}}</code></td></tr>
-                                    <tr><td><code>{{uuid}}</code></td><td>隨機 UUID（同一次請求內同值）</td></tr>
-                                    <tr><td><code>{{computed.名稱}}</code></td><td>計算欄位</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-                        <p class="hint">與訊息模板刻意相反：請求模板打錯佔位符會在<strong>存檔時直接擋（400）</strong>。</p>
-                    </div>
-                    <div class="var-ref__section">
-                        <p class="var-ref__title">計算欄位的「輸入」</p>
-                        <p class="hint">請求模板全部變數，外加 <code>{{secret.名稱}}</code>。<code>{{secret.*}}</code> 只能寫在這裡，不能出現在 URL／header／body。</p>
-                    </div>
-                </details>
-            </div>
+                <div class="field" id="monBodyField" hidden>
+                    <label for="monBody">request body（POST 用）</label>
+                    <textarea id="monBody" placeholder="{&quot;query&quot;:&quot;...&quot;}"></textarea>
+                </div>
 
-            <div class="form-row">
                 <div class="field">
-                    <label for="monCooldown">冷卻秒數</label>
-                    <input type="number" id="monCooldown" min="0" step="1" placeholder="0">
+                    <label for="monHeaders">自訂 header（JSON，選填）</label>
+                    <div class="field-row-between" id="monHeadersCurrentRow" hidden>
+                        <p class="hint" id="monHeadersCurrent"></p>
+                        <button type="button" class="btn btn--sm btn--ghost" id="monHeadersShowBtn" hidden>
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                            顯示目前值
+                        </button>
+                    </div>
+                    <textarea id="monHeaders" placeholder='{"Authorization":"Bearer xxx"}'></textarea>
+                    <p class="hint" id="monHeadersHint">扁平的字串對字串 JSON。留空 = 不變更既有 header。</p>
                 </div>
+
+                <!-- W16：站台登入。放在 header 正下方，因為它做的事就是「自動填一個 header」 -->
                 <div class="field">
-                    <label for="monMaxPerDay">每日通知上限（選填）</label>
-                    <input type="number" id="monMaxPerDay" min="1" step="1" placeholder="留空 = 不限">
+                    <label for="monLogin">站台登入（選填）</label>
+                    <select id="monLogin">
+                        <option value="">不需要登入</option>
+                    </select>
+                    <p class="hint" id="monLoginHint">目標站台的 token 會過期時選這個，系統會自動登入取得新 token 再抓。</p>
+                    <details class="hint-more">
+                        <summary>什麼時候需要</summary>
+                        <p class="hint">如果貼上的 header 裡有 <code>Authorization</code> 而且只能撐一小時左右，那就是短效 token，手動貼的會過期。改用這裡選一組登入設定，系統每次抓取前會確認 token 還有效，過期就自動換一個。登入設定在左側「站台登入」頁建立。</p>
+                    </details>
                 </div>
-            </div>
+            </section>
 
-            <fieldset class="field">
-                <legend class="fieldset-label">選項</legend>
-                <div class="choices">
-                    <label class="choice"><input type="checkbox" id="monEnabled" checked><span><span class="choice__title">啟用</span></span></label>
-                    <label class="choice"><input type="checkbox" id="monNotifyOnFailure" checked><span><span class="choice__title">連續失敗時通知</span></span></label>
+            <!-- 4 ─ 比對規則 -->
+            <section class="form-section">
+                <div class="form-section__head">
+                    <h4 class="form-section__title"><span class="form-section__num">4</span>怎麼判斷有變化</h4>
+                    <p class="form-section__desc">決定「什麼算變了」。抓下來的內容用「先測一次」展開成樹，點節點就能填進抽取欄位。</p>
                 </div>
-            </fieldset>
 
-            <div class="field">
-                <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3); flex-wrap:wrap">
-                    <p class="fieldset-label" style="margin:0">立即測試</p>
-                    <div style="display:flex; gap:var(--sp-2)">
+                <div class="field">
+                    <label for="monCompareMode">比對模式</label>
+                    <select id="monCompareMode">
+                        <option value="WHOLE_BODY">WHOLE_BODY（整包比對）</option>
+                        <option value="EXTRACTED">EXTRACTED（只比對指定欄位）</option>
+                        <option value="NEW_ITEMS">NEW_ITEMS（只通知新項目）</option>
+                    </select>
+                </div>
+
+                <div class="field">
+                    <p class="fieldset-label">抽取欄位</p>
+                    <p class="hint">JsonPointer 位置，訊息模板用 <code>{{value.NAME}}</code> 引用。</p>
+                    <div id="monRulesRows"></div>
+                    <button type="button" class="btn btn--sm" id="monAddRule" style="margin-top:var(--sp-2)">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                        新增欄位
+                    </button>
+                </div>
+
+                <div id="monItemPointerField" hidden>
+                    <div class="form-row">
+                        <div class="field">
+                            <label for="monItemPointer">項目陣列位置</label>
+                            <input type="text" id="monItemPointer" placeholder="/data/items">
+                        </div>
+                        <div class="field">
+                            <label for="monItemKeyPointer">項目鍵位置（相對於每個項目）</label>
+                            <input type="text" id="monItemKeyPointer" placeholder="/id">
+                        </div>
+                    </div>
+                    <p class="hint">此模式下抽取欄位相對於<strong>每個項目</strong>解讀，模板用 <code>{{item.NAME}}</code> 引用。</p>
+                </div>
+            </section>
+
+            <!-- 5 ─ 通知長什麼樣 -->
+            <section class="form-section">
+                <div class="form-section__head">
+                    <h4 class="form-section__title"><span class="form-section__num">5</span>通知內容</h4>
+                </div>
+
+                <div class="field">
+                    <label for="monTemplate">訊息模板</label>
+                    <textarea id="monTemplate" required placeholder="監控「{{monitor.name}}」狀態變成 {{value.status}}（原本 {{old.status}}）"></textarea>
+                    <p class="hint">輸入 <code>{{</code> 會跳出可用變數清單（<code>Ctrl+Space</code> 手動叫出）。</p>
+                    <details class="var-ref">
+                        <summary>完整變數對照表</summary>
+                        <div class="var-ref__section">
+                            <p class="var-ref__title">訊息模板（monTemplate）</p>
+                            <div class="table-wrap">
+                                <table class="grid">
+                                    <thead><tr><th>變數</th><th>意義</th><th>何時有值</th></tr></thead>
+                                    <tbody>
+                                        <tr><td><code>{{value.欄位}}</code></td><td>本次抓到的值</td><td>一律</td></tr>
+                                        <tr><td><code>{{old.欄位}}</code></td><td>上一次的值</td><td>僅正式通知。試算一律 —</td></tr>
+                                        <tr><td><code>{{item.欄位}}</code></td><td>該筆新項目的欄位</td><td>僅 NEW_ITEMS 模式，逐筆渲染時</td></tr>
+                                        <tr><td><code>{{monitor.name}}</code></td><td>監控名稱</td><td>一律</td></tr>
+                                        <tr><td><code>{{now}}</code></td><td>現在時間 MM/dd HH:mm（台北）</td><td>一律</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p class="hint">打錯 → —（不原樣輸出）；值為 null → —；渲染後截到 4500 字；<code>NEW_ITEMS</code> 每筆各渲染一次，最多 20 筆。</p>
+                        </div>
+                        <div class="var-ref__section">
+                            <p class="var-ref__title">請求模板（monUrl／monHeaders／monBody）</p>
+                            <div class="table-wrap">
+                                <table class="grid">
+                                    <thead><tr><th>變數</th><th>產出</th></tr></thead>
+                                    <tbody>
+                                        <tr><td><code>{{now.epochSeconds}}</code></td><td>Unix 秒</td></tr>
+                                        <tr><td><code>{{now.epochMillis}}</code></td><td>Unix 毫秒</td></tr>
+                                        <tr><td><code>{{now.iso8601}}</code></td><td>2026-08-24T03:00:00Z（UTC，秒精度）</td></tr>
+                                        <tr><td><code>{{now.format:PATTERN}}</code></td><td>自訂格式，台北時區</td></tr>
+                                        <tr><td><code>{{now±N[smhd].…}}</code></td><td>位移，例如 <code>{{now-7d.format:yyyy-MM-dd}}</code></td></tr>
+                                        <tr><td><code>{{uuid}}</code></td><td>隨機 UUID（同一次請求內同值）</td></tr>
+                                        <tr><td><code>{{computed.名稱}}</code></td><td>計算欄位</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p class="hint">與訊息模板刻意相反：請求模板打錯佔位符會在<strong>存檔時直接擋（400）</strong>。</p>
+                        </div>
+                        <div class="var-ref__section">
+                            <p class="var-ref__title">計算欄位的「輸入」</p>
+                            <p class="hint">請求模板全部變數，外加 <code>{{secret.名稱}}</code>。<code>{{secret.*}}</code> 只能寫在這裡，不能出現在 URL／header／body。</p>
+                        </div>
+                    </details>
+                </div>
+            </section>
+
+            <!-- 6 ─ 進階：只有需要簽章的站台才會用到，預設收起 -->
+            <details class="form-section">
+                <summary>
+                    <h4 class="form-section__title"><span class="form-section__num">6</span>簽章與計算欄位
+                        <span class="form-section__summary">— 目標 API 需要動態簽章時才需要</span>
+                    </h4>
+                    <svg class="icon form-section__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                </summary>
+                <div class="form-section__body">
+                    <div class="field">
+                        <p class="fieldset-label">密鑰（signing secret）</p>
+                        <p class="hint">計算欄位用 <code>{{secret.NAME}}</code> 引用。值加密儲存，後台只顯示名稱與「已設定」。</p>
+                        <div id="monSecretsExisting"></div>
+                        <div id="monSecretsNewRows"></div>
+                        <button type="button" class="btn btn--sm" id="monAddSecret" style="margin-top:var(--sp-2)">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                            新增密鑰
+                        </button>
+                    </div>
+
+                    <div class="field">
+                        <p class="fieldset-label">計算欄位</p>
+                        <p class="hint">依序求值，可串接多段雜湊；模板用 <code>{{computed.NAME}}</code> 引用結果。</p>
+                        <details class="hint-more">
+                            <summary>串接規則</summary>
+                            <p class="hint">每個欄位的 <code>steps</code> 依序套用，前一段的輸出字串就是後一段的輸入——這是雙重雜湊（例如 <code>MD5(MD5(x).toUpperCase()).toUpperCase()</code>）能表示的原因。輸入可用 <code>{{secret.NAME}}</code>、<code>{{now.epochSeconds}}</code>、<code>{{uuid}}</code>，以及<strong>更早</strong>定義的 <code>{{computed.NAME}}</code>。</p>
+                        </details>
+                        <div id="monComputedRows"></div>
+                        <button type="button" class="btn btn--sm" id="monAddComputedField" style="margin-top:var(--sp-2)">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                            新增計算欄位
+                        </button>
+                    </div>
+                </div>
+            </details>
+
+            <!-- 7 ─ 進階：預設值就能用，預設收起 -->
+            <details class="form-section">
+                <summary>
+                    <h4 class="form-section__title"><span class="form-section__num">7</span>防洗版與開關
+                        <span class="form-section__summary">— 冷卻、每日上限、失敗通知</span>
+                    </h4>
+                    <svg class="icon form-section__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                </summary>
+                <div class="form-section__body">
+                    <div class="form-row">
+                        <div class="field">
+                            <label for="monCooldown">冷卻秒數</label>
+                            <input type="number" id="monCooldown" min="0" step="1" placeholder="0">
+                            <p class="hint">發過一次通知後，這段時間內不再發。</p>
+                        </div>
+                        <div class="field">
+                            <label for="monMaxPerDay">每日通知上限</label>
+                            <input type="number" id="monMaxPerDay" min="1" step="1" placeholder="留空 = 不限">
+                        </div>
+                    </div>
+
+                    <fieldset class="field">
+                        <legend class="fieldset-label">開關</legend>
+                        <div class="choices">
+                            <label class="choice"><input type="checkbox" id="monEnabled" checked><span><span class="choice__title">啟用</span></span></label>
+                            <label class="choice"><input type="checkbox" id="monNotifyOnFailure" checked><span><span class="choice__title">連續失敗時通知</span></span></label>
+                        </div>
+                    </fieldset>
+                </div>
+            </details>
+
+            <!-- 8 ─ 存檔前先確認真的抓得到 -->
+            <section class="form-section">
+                <div class="form-section__head">
+                    <h4 class="form-section__title"><span class="form-section__num">8</span>先測一次</h4>
+                    <p class="form-section__desc">用目前填寫的設定實際打一次目標 API。不會發送、不會存檔。</p>
+                </div>
+
+                <div class="field">
+                    <div style="display:flex; gap:var(--sp-2); flex-wrap:wrap">
                         <button type="button" class="btn btn--sm" id="monTestBtn">
                             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M5 3l14 9-14 9V3z"/></svg>
                             立即測試
@@ -558,11 +667,10 @@
                             再抓一次比對
                         </button>
                     </div>
+                    <p class="hint">「再抓一次比對」會標出跟上次不一樣的欄位——每次都在變的欄位（時間戳、隨機碼）不適合當監控目標。</p>
+                    <div id="monTestResult" hidden></div>
                 </div>
-                <p class="hint">用上面目前填寫的設定實際打一次目標 API，不會發送、不會存檔。「再抓一次比對」會再打一次，標出跟上次不一樣的欄位——
-                    連續每次都在變的欄位（時間戳、隨機碼之類）不適合當監控目標。</p>
-                <div id="monTestResult" hidden></div>
-            </div>
+            </section>
         </div>
         <div class="dialog__foot">
             <button type="button" class="btn" id="monitorCancel">取消</button>
@@ -570,6 +678,116 @@
         </div>
     </form>
     <div id="varMenu" class="var-menu" role="listbox" aria-label="可用變數" hidden></div>
+</dialog>
+
+<!-- 新增/編輯站台登入（doc 15 §9） -->
+<dialog id="loginDialog" aria-labelledby="loginTitle">
+    <form method="dialog" id="loginForm">
+        <div class="dialog__head"><h3 id="loginTitle">新增站台登入</h3></div>
+        <div class="dialog__body">
+            <div id="loginError" class="notice notice--error" role="alert" hidden></div>
+
+            <section class="form-section">
+                <div class="form-section__head">
+                    <h4 class="form-section__title"><span class="form-section__num">1</span>這組登入叫什麼</h4>
+                </div>
+                <div class="field">
+                    <label for="loginName">名稱</label>
+                    <input type="text" id="loginName" required maxlength="100" placeholder="例如：CAS Shield（學生帳號）">
+                    <p class="hint">建立監控時會用這個名稱在下拉選單裡選。</p>
+                </div>
+            </section>
+
+            <section class="form-section">
+                <div class="form-section__head">
+                    <h4 class="form-section__title"><span class="form-section__num">2</span>Cognito 設定</h4>
+                    <p class="form-section__desc">目標站台的 user pool 資訊。通常在網站前端的設定檔（例如 <code>envconfig.js</code>）裡找得到。</p>
+                </div>
+                <div class="form-row">
+                    <div class="field">
+                        <label for="loginRegion">Region</label>
+                        <input type="text" id="loginRegion" required placeholder="eu-west-2" autocomplete="off">
+                    </div>
+                    <div class="field">
+                        <label for="loginUserPoolId">User pool ID</label>
+                        <input type="text" id="loginUserPoolId" required placeholder="eu-west-2_XXXXXXXXX" autocomplete="off">
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="loginClientId">App client ID</label>
+                    <input type="text" id="loginClientId" required placeholder="1h3khfsa958g8qa0gge2dnqvka" autocomplete="off">
+                    <p class="hint">Region 前綴必須與 user pool ID 一致，否則存檔會被擋。</p>
+                </div>
+            </section>
+
+            <section class="form-section">
+                <div class="form-section__head">
+                    <h4 class="form-section__title"><span class="form-section__num">3</span>帳號密碼</h4>
+                    <p class="form-section__desc">密碼加密後儲存，之後任何畫面與 API 都讀不回來。登入走 SRP，密碼不會離開這台伺服器。</p>
+                </div>
+                <div class="field">
+                    <label for="loginUsername">帳號</label>
+                    <input type="text" id="loginUsername" required placeholder="student@example.com" autocomplete="username">
+                </div>
+                <div class="field">
+                    <label for="loginPassword">密碼</label>
+                    <input type="password" id="loginPassword" placeholder="留空 = 不變更" autocomplete="new-password">
+                    <p class="hint" id="loginPasswordHint">建立時必填。</p>
+                    <details class="hint-more">
+                        <summary>密碼錯誤會怎樣</summary>
+                        <p class="hint">連續登入失敗會被對方鎖帳號，所以帳密錯誤時這組登入會<strong>立刻自動停用</strong>並發 LINE 通知，不會反覆重試。修正密碼後在這裡重新啟用即可。</p>
+                    </details>
+                </div>
+            </section>
+
+            <details class="form-section">
+                <summary>
+                    <h4 class="form-section__title"><span class="form-section__num">4</span>Token 注入方式
+                        <span class="form-section__summary">— 預設適用多數站台</span>
+                    </h4>
+                    <svg class="icon form-section__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                </summary>
+                <div class="form-section__body">
+                    <div class="form-row">
+                        <div class="field">
+                            <label for="loginHeaderName">Header 名稱</label>
+                            <input type="text" id="loginHeaderName" placeholder="Authorization" autocomplete="off">
+                        </div>
+                        <div class="field">
+                            <label for="loginHeaderTemplate">Header 值格式</label>
+                            <input type="text" id="loginHeaderTemplate" placeholder="{token}" autocomplete="off">
+                            <p class="hint">必須含 <code>{token}</code>。多數站台用 <code>Bearer {token}</code>，少數送裸 token。</p>
+                        </div>
+                    </div>
+                    <fieldset class="field">
+                        <legend class="fieldset-label">開關</legend>
+                        <div class="choices">
+                            <label class="choice"><input type="checkbox" id="loginEnabled" checked><span><span class="choice__title">啟用</span></span></label>
+                        </div>
+                    </fieldset>
+                </div>
+            </details>
+
+            <section class="form-section">
+                <div class="form-section__head">
+                    <h4 class="form-section__title"><span class="form-section__num">5</span>測試登入</h4>
+                    <p class="form-section__desc">存檔後可在這裡實際登入一次，確認帳密與設定都正確。</p>
+                </div>
+                <div class="field">
+                    <button type="button" class="btn btn--sm" id="loginTestBtn" disabled>
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M5 3l14 9-14 9V3z"/></svg>
+                        測試登入
+                    </button>
+                    <p class="hint" id="loginTestHint">先儲存才能測試。</p>
+                    <div id="loginTestResult" hidden></div>
+                </div>
+            </section>
+        </div>
+        <div class="dialog__foot">
+            <button type="button" class="btn" id="loginCancel">取消</button>
+            <button type="submit" class="btn btn--primary" id="loginSave">儲存</button>
+        </div>
+    </form>
 </dialog>
 
 <!-- 監控執行紀錄 -->

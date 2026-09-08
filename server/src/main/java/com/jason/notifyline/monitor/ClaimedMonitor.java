@@ -51,6 +51,12 @@ import java.util.Set;
  *                       {@code ComputedFieldEvaluator} 使用。見
  *                       {@code Docs/plan/13-監控計算欄位設計.md} §5
  * @param computedFields 依序求值的計算欄位定義（{@code claim()} 時已從 JSONB 解析）
+ * @param loginId        引用的 {@code monitor_login}；{@code null} = 不需要登入。
+ *                       <strong>刻意只帶 id 而非解出來的 token</strong>：token 有壽命，
+ *                       取件與實際抓取之間可能隔著整個租約時間（預設 2 分鐘）加上排隊
+ *                       等待，取件當下換到的 token 送出去時可能已經過期。
+ *                       {@code ApiMonitorRunner} 在真正要送出的那一刻才向
+ *                       {@code SiteLoginService} 要，才能保證新鮮
  */
 public record ClaimedMonitor(
         Long id,
@@ -69,7 +75,8 @@ public record ClaimedMonitor(
         boolean firstRun,
         Set<String> seenKeys,
         Map<String, String> secrets,
-        List<ComputedField> computedFields) {
+        List<ComputedField> computedFields,
+        Long loginId) {
 
     public ClaimedMonitor {
         headers = headers == null ? Map.of() : Map.copyOf(headers);
@@ -101,7 +108,32 @@ public record ClaimedMonitor(
                           boolean firstRun,
                           Set<String> seenKeys) {
         this(id, name, url, method, requestBody, headers, compareMode, extractRules, itemPointer, itemKeyPointer,
-                messageTemplate, lastFingerprint, lastState, firstRun, seenKeys, Map.of(), List.of());
+                messageTemplate, lastFingerprint, lastState, firstRun, seenKeys, Map.of(), List.of(), null);
+    }
+
+    /**
+     * W13 的呼叫端（有 secret／計算欄位、但不涉及站台登入）的簡便建構子：
+     * {@code loginId} 預設 {@code null}，行為等同「這個監控不需要登入」。
+     */
+    public ClaimedMonitor(Long id,
+                          String name,
+                          String url,
+                          String method,
+                          String requestBody,
+                          Map<String, String> headers,
+                          CompareMode compareMode,
+                          List<ExtractRule> extractRules,
+                          String itemPointer,
+                          String itemKeyPointer,
+                          String messageTemplate,
+                          byte[] lastFingerprint,
+                          Map<String, String> lastState,
+                          boolean firstRun,
+                          Set<String> seenKeys,
+                          Map<String, String> secrets,
+                          List<ComputedField> computedFields) {
+        this(id, name, url, method, requestBody, headers, compareMode, extractRules, itemPointer, itemKeyPointer,
+                messageTemplate, lastFingerprint, lastState, firstRun, seenKeys, secrets, computedFields, null);
     }
 
     /** 防禦性複製，理由同 {@code ApiMonitor.getLastFingerprint()}。 */
