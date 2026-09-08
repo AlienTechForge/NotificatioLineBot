@@ -12,6 +12,7 @@ import com.jason.notifyline.monitor.parse.ChangeDetector;
 import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
 import com.jason.notifyline.monitor.request.RequestTemplate;
+import com.jason.notifyline.monitor.login.SiteLoginService;
 import com.jason.notifyline.monitor.session.SiteSessionService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -65,6 +66,8 @@ class ApiMonitorRunnerTest {
     @Mock
     private SiteSessionService siteSessionService;
     @Mock
+    private SiteLoginService siteLoginService;
+    @Mock
     private ChangeDetector changeDetector;
     @Mock
     private MessageTemplate messageTemplate;
@@ -95,7 +98,7 @@ class ApiMonitorRunnerTest {
         // 走到 attachCookies，嚴格模式下會被判定成「多餘的 stub」。
         lenient().when(siteSessionService.attachCookies(any(), any()))
                 .thenAnswer(invocation -> invocation.getArgument(1));
-        runner = new ApiMonitorRunner(guard, fetcher, siteSessionService, changeDetector, messageTemplate,
+        runner = new ApiMonitorRunner(guard, fetcher, siteSessionService, siteLoginService, changeDetector, messageTemplate,
                 requestTemplate, computedFieldEvaluator, store, properties, SAME_THREAD_EXECUTOR, clock);
     }
 
