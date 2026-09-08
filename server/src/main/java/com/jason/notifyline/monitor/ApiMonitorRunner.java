@@ -7,6 +7,9 @@ import com.jason.notifyline.monitor.domain.CompareMode;
 import com.jason.notifyline.monitor.fetch.ApiFetcher;
 import com.jason.notifyline.monitor.fetch.FetchResult;
 import com.jason.notifyline.monitor.fetch.OutboundUrlGuard;
+import com.jason.notifyline.monitor.login.CognitoAuthException;
+import com.jason.notifyline.monitor.login.ResolvedLoginHeader;
+import com.jason.notifyline.monitor.login.SiteLoginService;
 import com.jason.notifyline.monitor.parse.ChangeDetector;
 import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
@@ -23,6 +26,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -72,6 +76,7 @@ public class ApiMonitorRunner {
     private final OutboundUrlGuard guard;
     private final ApiFetcher fetcher;
     private final SiteSessionService siteSessionService;
+    private final SiteLoginService siteLoginService;
     private final ChangeDetector changeDetector;
     private final MessageTemplate messageTemplate;
     private final RequestTemplate requestTemplate;
@@ -84,6 +89,7 @@ public class ApiMonitorRunner {
     public ApiMonitorRunner(OutboundUrlGuard guard,
                             ApiFetcher fetcher,
                             SiteSessionService siteSessionService,
+                            SiteLoginService siteLoginService,
                             ChangeDetector changeDetector,
                             MessageTemplate messageTemplate,
                             RequestTemplate requestTemplate,
@@ -95,6 +101,7 @@ public class ApiMonitorRunner {
         this.guard = guard;
         this.fetcher = fetcher;
         this.siteSessionService = siteSessionService;
+        this.siteLoginService = siteLoginService;
         this.changeDetector = changeDetector;
         this.messageTemplate = messageTemplate;
         this.requestTemplate = requestTemplate;
@@ -241,8 +248,27 @@ public class ApiMonitorRunner {
             headersWithCookies = renderedHeaders;
         }
 
+        // 站台登入（W16）：在真正要送出的這一刻才換 token，不在 claim() 時先換——
+        // 見 ClaimedMonitor#loginId。
+        //
+        // 與 cookie jar 相反，這裡的失敗<strong>不可</strong>吞掉繼續打：沒有 token 的
+        // 請求一定會拿到 401，那個 401 會被當成「回應變了」而發出一則莫名其妙的通知，
+        // 或被記成 PARSE_ERROR。直接記一次 LOGIN_ERROR，讓失敗通知說出真正的原因。
+        Map<String, String> headersWithLogin = headersWithCookies;
+        if (monitor.loginId() != null) {
+            try {
+                ResolvedLoginHeader loginHeader = siteLoginService.resolve(monitor.loginId());
+                headersWithLogin = new LinkedHashMap<>(headersWithCookies);
+                headersWithLogin.put(loginHeader.name(), loginHeader.value());
+            } catch (CognitoAuthException e) {
+                // e.getMessage() 只含 Cognito 的錯誤型別與說明，不含帳密或 token
+                // ——見 CognitoAuthException 類別註解。
+                return failure(startedAt, null, "LOGIN_ERROR", e.getMessage(), requestHost);
+            }
+        }
+
         FetchResult fetchResult = fetcher.fetch(new ApiFetcher.FetchRequest(
-                targetUri, monitor.method(), renderedBody, headersWithCookies));
+                targetUri, monitor.method(), renderedBody, headersWithLogin));
 
         // 回應後：不論成功或失敗都嘗試合併 Set-Cookie 回 jar（例如 401 也可能夾帶新
         // CSRF token），理由見 FetchResult 類別註解。同樣不能讓這一步的例外蓋掉真正

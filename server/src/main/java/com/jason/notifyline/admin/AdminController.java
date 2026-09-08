@@ -34,9 +34,12 @@ import java.util.UUID;
 public class AdminController {
 
     private final AdminService adminService;
+    private final MonitorLoginAdminService monitorLoginAdminService;
 
-    public AdminController(AdminService adminService) {
+    public AdminController(AdminService adminService,
+                           MonitorLoginAdminService monitorLoginAdminService) {
         this.adminService = adminService;
+        this.monitorLoginAdminService = monitorLoginAdminService;
     }
 
     // ------------------------------------------------------------ 儀表板
@@ -150,6 +153,45 @@ public class AdminController {
     public ApiResponse<Void> cancelScheduled(@PathVariable UUID id) {
         adminService.cancelScheduled(id);
         return ApiResponse.ok(null);
+    }
+
+
+    // ---------------------------------------------------------- 站台登入（W16）
+
+    /** 列表。刻意不含密碼與 token——見 {@link AdminDto.LoginSummary} 類別註解。 */
+    @GetMapping("/logins")
+    public ApiResponse<List<AdminDto.LoginSummary>> listLogins() {
+        return ApiResponse.ok(monitorLoginAdminService.list());
+    }
+
+    @PostMapping("/logins")
+    public ResponseEntity<ApiResponse<AdminDto.LoginSummary>> createLogin(
+            @Valid @RequestBody AdminDto.CreateLoginRequest body) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(ApiResponse.ok(monitorLoginAdminService.create(body)));
+    }
+
+    @PutMapping("/logins/{id}")
+    public ApiResponse<AdminDto.LoginSummary> updateLogin(
+            @PathVariable Long id, @Valid @RequestBody AdminDto.UpdateLoginRequest body) {
+        return ApiResponse.ok(monitorLoginAdminService.update(id, body));
+    }
+
+    @DeleteMapping("/logins/{id}")
+    public ApiResponse<Void> deleteLogin(@PathVariable Long id) {
+        monitorLoginAdminService.delete(id);
+        return ApiResponse.ok(null);
+    }
+
+    /**
+     * 測試登入：真的跑一次，不吃 token 快取。
+     *
+     * <p>失敗回 200 + {@code success=false}，不是 4xx——這是「測試」按鈕，失敗是
+     * 預期中的結果之一，前端要顯示原因而不是當成請求出錯。
+     */
+    @PostMapping("/logins/{id}/test")
+    public ApiResponse<AdminDto.LoginTestResult> testLogin(@PathVariable Long id) {
+        return ApiResponse.ok(monitorLoginAdminService.test(id));
     }
 
     // -------------------------------------------------------------- 監控

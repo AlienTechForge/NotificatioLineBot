@@ -11,6 +11,7 @@ import com.jason.notifyline.monitor.domain.ApiMonitorRun;
 import com.jason.notifyline.monitor.domain.CompareMode;
 import com.jason.notifyline.monitor.domain.ComputedField;
 import com.jason.notifyline.monitor.domain.ExtractRule;
+import com.jason.notifyline.monitor.login.LoginType;
 import com.jason.notifyline.monitor.session.SiteSession;
 import com.jason.notifyline.notification.api.NotificationDetail;
 import com.jason.notifyline.notification.domain.Notification;
@@ -428,18 +429,24 @@ public final class AdminDto {
             boolean failureNotified,
             Instant lastRunAt,
             Instant nextRunAt,
-            Instant createdAt) {
+            Instant createdAt,
+
+            /* W16：站台登入。loginName 只為了讓列表不必再查一次，null = 這個監控不需要登入。 */
+            Long loginId,
+            String loginName) {
 
         public static MonitorSummary from(ApiMonitor m, String clientId, String clientName,
                                           List<ExtractRule> extractRules, List<String> headerNames,
-                                          List<String> secretNames, List<ComputedField> computedFields) {
+                                          List<String> secretNames, List<ComputedField> computedFields,
+                                          String loginName) {
             return new MonitorSummary(
                     m.getId(), m.getName(), clientId, clientName, m.getUrl(), hostOf(m.getUrl()), m.getMethod(),
                     m.getRequestBody(), m.getHeadersCiphertext() != null, headerNames, secretNames,
                     m.getIntervalSeconds(), m.isEnabled(), m.getCompareMode(), extractRules, m.getItemPointer(),
                     m.getItemKeyPointer(), computedFields, m.getMessageTemplate(), m.isNotifyOnFailure(),
                     m.getCooldownSeconds(), m.getMaxNotificationsPerDay(), m.getConsecutiveFailures(),
-                    m.isFailureNotified(), m.getLastRunAt(), m.getNextRunAt(), m.getCreatedAt());
+                    m.isFailureNotified(), m.getLastRunAt(), m.getNextRunAt(), m.getCreatedAt(),
+                    m.getLoginId(), loginName);
         }
 
         /** 列表要顯示的是目標 host，不是完整網址（可能帶查詢字串）。解析不出來就顯示 null，前端自行代換。 */
@@ -504,9 +511,12 @@ public final class AdminDto {
 
             Integer cooldownSeconds,
 
-            Integer maxNotificationsPerDay) {
+            Integer maxNotificationsPerDay,
 
-        /** 舊有呼叫端（不涉及 secret／計算欄位的既有測試）的簡便建構子。 */
+            /* W16：要用哪一組站台登入。null = 不需要登入。 */
+            Long loginId) {
+
+        /** 舊有呼叫端（不涉及 secret／計算欄位／站台登入的既有測試）的簡便建構子。 */
         public CreateMonitorRequest(String name, String clientId, String url, String method, String requestBody,
                                     Map<String, String> headers, int intervalSeconds, Boolean enabled,
                                     CompareMode compareMode, List<ExtractRule> extractRules, String itemPointer,
@@ -514,7 +524,24 @@ public final class AdminDto {
                                     Integer cooldownSeconds, Integer maxNotificationsPerDay) {
             this(name, clientId, url, method, requestBody, headers, Map.of(), intervalSeconds, enabled, compareMode,
                     extractRules, itemPointer, itemKeyPointer, List.of(), messageTemplate, notifyOnFailure,
-                    cooldownSeconds, maxNotificationsPerDay);
+                    cooldownSeconds, maxNotificationsPerDay, null);
+        }
+
+        /**
+         * W13 的呼叫端（有 secret／計算欄位、但不涉及站台登入）的簡便建構子。
+         *
+         * <p>與上面那個少兩個參數的版本分工相同：W16 在最後加了 {@code loginId}，
+         * 既有測試不必為了一個它們不關心的欄位全部改一次。
+         */
+        public CreateMonitorRequest(String name, String clientId, String url, String method, String requestBody,
+                                    Map<String, String> headers, Map<String, String> secrets, int intervalSeconds,
+                                    Boolean enabled, CompareMode compareMode, List<ExtractRule> extractRules,
+                                    String itemPointer, String itemKeyPointer, List<ComputedField> computedFields,
+                                    String messageTemplate, Boolean notifyOnFailure, Integer cooldownSeconds,
+                                    Integer maxNotificationsPerDay) {
+            this(name, clientId, url, method, requestBody, headers, secrets, intervalSeconds, enabled, compareMode,
+                    extractRules, itemPointer, itemKeyPointer, computedFields, messageTemplate, notifyOnFailure,
+                    cooldownSeconds, maxNotificationsPerDay, null);
         }
     }
 
@@ -568,9 +595,12 @@ public final class AdminDto {
 
             Integer cooldownSeconds,
 
-            Integer maxNotificationsPerDay) {
+            Integer maxNotificationsPerDay,
 
-        /** 舊有呼叫端（不涉及 secret／計算欄位的既有測試）的簡便建構子。 */
+            /* W16：要用哪一組站台登入。null = 不需要登入。 */
+            Long loginId) {
+
+        /** 舊有呼叫端（不涉及 secret／計算欄位／站台登入的既有測試）的簡便建構子。 */
         public UpdateMonitorRequest(String name, String clientId, String url, String method, String requestBody,
                                     Map<String, String> headers, int intervalSeconds, Boolean enabled,
                                     CompareMode compareMode, List<ExtractRule> extractRules, String itemPointer,
@@ -578,7 +608,24 @@ public final class AdminDto {
                                     Integer cooldownSeconds, Integer maxNotificationsPerDay) {
             this(name, clientId, url, method, requestBody, headers, Map.of(), intervalSeconds, enabled, compareMode,
                     extractRules, itemPointer, itemKeyPointer, List.of(), messageTemplate, notifyOnFailure,
-                    cooldownSeconds, maxNotificationsPerDay);
+                    cooldownSeconds, maxNotificationsPerDay, null);
+        }
+
+        /**
+         * W13 的呼叫端（有 secret／計算欄位、但不涉及站台登入）的簡便建構子。
+         *
+         * <p>與上面那個少兩個參數的版本分工相同：W16 在最後加了 {@code loginId}，
+         * 既有測試不必為了一個它們不關心的欄位全部改一次。
+         */
+        public UpdateMonitorRequest(String name, String clientId, String url, String method, String requestBody,
+                                    Map<String, String> headers, Map<String, String> secrets, int intervalSeconds,
+                                    Boolean enabled, CompareMode compareMode, List<ExtractRule> extractRules,
+                                    String itemPointer, String itemKeyPointer, List<ComputedField> computedFields,
+                                    String messageTemplate, Boolean notifyOnFailure, Integer cooldownSeconds,
+                                    Integer maxNotificationsPerDay) {
+            this(name, clientId, url, method, requestBody, headers, secrets, intervalSeconds, enabled, compareMode,
+                    extractRules, itemPointer, itemKeyPointer, computedFields, messageTemplate, notifyOnFailure,
+                    cooldownSeconds, maxNotificationsPerDay, null);
         }
     }
 
@@ -754,5 +801,101 @@ public final class AdminDto {
                     session.getHost(), names, names.size(),
                     session.getLastRefreshedAt(), session.getCreatedAt(), session.getUpdatedAt());
         }
+    }
+
+    // ---------------------------------------------------------------- 站台登入
+
+    /**
+     * 站台登入設定的列表／詳情。見 {@code Docs/plan/15-監控站台登入設計.md}。
+     *
+     * <p><strong>刻意沒有密碼、refresh token、idToken 這些欄位</strong>——它們在資料庫裡
+     * 是加密的，而這個 DTO 會被序列化成 JSON 送到瀏覽器。後台只需要知道「有沒有設定」
+     * 與「token 何時到期」，不需要值本身。
+     *
+     * @param hasPassword    密碼已設定（編輯時留空 = 不變更，前端據此顯示提示）
+     * @param tokenExpiresAt 目前快取的 token 到期時間；null = 手上沒有可用 token
+     * @param monitorCount   有幾個監控正在用這組登入。刪除前要讓使用者知道會影響幾筆
+     */
+    public record LoginSummary(
+            Long id,
+            String name,
+            LoginType type,
+            boolean enabled,
+            String region,
+            String userPoolId,
+            String clientId,
+            String username,
+            String headerName,
+            String headerValueTemplate,
+            boolean hasPassword,
+            Instant tokenExpiresAt,
+            Instant lastLoginAt,
+            String lastError,
+            int consecutiveFailures,
+            int monitorCount,
+            Instant createdAt) {
+    }
+
+    /**
+     * 建立站台登入。
+     *
+     * @param password 明文密碼。<strong>只在這個請求的處理過程中存在</strong>：立刻用
+     *                 {@code SecretCipher} 加密後落地，之後任何 API 都讀不回來
+     */
+    public record CreateLoginRequest(
+            @NotBlank(message = "name is required")
+            @Size(max = 100, message = "name must be at most 100 characters") String name,
+
+            LoginType type,
+
+            @NotBlank(message = "region is required") String region,
+
+            @NotBlank(message = "userPoolId is required") String userPoolId,
+
+            @NotBlank(message = "clientId is required") String clientId,
+
+            @NotBlank(message = "username is required") String username,
+
+            @NotBlank(message = "password is required") String password,
+
+            String headerName,
+
+            String headerValueTemplate) {
+    }
+
+    /**
+     * 編輯站台登入。
+     *
+     * @param password 留空 = 不變更（沿用 header 欄位既有的慣例）。有值時，除了換密碼
+     *                 之外還會清掉既有 token 與 refresh token——它們可能是舊密碼發出的
+     */
+    public record UpdateLoginRequest(
+            @NotBlank(message = "name is required")
+            @Size(max = 100, message = "name must be at most 100 characters") String name,
+
+            @NotBlank(message = "region is required") String region,
+
+            @NotBlank(message = "userPoolId is required") String userPoolId,
+
+            @NotBlank(message = "clientId is required") String clientId,
+
+            @NotBlank(message = "username is required") String username,
+
+            String password,
+
+            String headerName,
+
+            String headerValueTemplate,
+
+            Boolean enabled) {
+    }
+
+    /**
+     * 「測試登入」的結果。
+     *
+     * <p><strong>不回傳 token</strong>：使用者要知道的是「能不能登入」與「多久要重登」，
+     * 不是 token 本身。回傳它只會讓一個機密多一個外流管道。
+     */
+    public record LoginTestResult(boolean success, Instant tokenExpiresAt, String error) {
     }
 }
