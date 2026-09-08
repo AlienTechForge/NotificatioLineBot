@@ -20,6 +20,8 @@ import com.jason.notifyline.monitor.compute.ComputedFieldEvaluator;
 import com.jason.notifyline.monitor.compute.ComputedFieldValidator;
 import com.jason.notifyline.monitor.domain.ApiMonitor;
 import com.jason.notifyline.monitor.domain.ApiMonitorRepository;
+import com.jason.notifyline.monitor.login.MonitorLogin;
+import com.jason.notifyline.monitor.login.MonitorLoginRepository;
 import com.jason.notifyline.monitor.domain.ApiMonitorRun;
 import com.jason.notifyline.monitor.domain.ApiMonitorRunRepository;
 import com.jason.notifyline.monitor.domain.CompareMode;
@@ -118,6 +120,7 @@ public class AdminService {
     private final DeliveryStore deliveryStore;
     private final LineQuotaClient lineQuotaClient;
     private final ApiMonitorRepository monitors;
+    private final MonitorLoginRepository monitorLogins;
     private final ApiMonitorRunRepository monitorRunRepository;
     private final ApiMonitorTestRunner monitorTestRunner;
     private final SecretCipher secretCipher;
@@ -143,6 +146,7 @@ public class AdminService {
                         DeliveryStore deliveryStore,
                         LineQuotaClient lineQuotaClient,
                         ApiMonitorRepository monitors,
+                        MonitorLoginRepository monitorLogins,
                         ApiMonitorRunRepository monitorRunRepository,
                         ApiMonitorTestRunner monitorTestRunner,
                         SecretCipher secretCipher,
@@ -167,6 +171,7 @@ public class AdminService {
         this.deliveryStore = deliveryStore;
         this.lineQuotaClient = lineQuotaClient;
         this.monitors = monitors;
+        this.monitorLogins = monitorLogins;
         this.monitorRunRepository = monitorRunRepository;
         this.monitorTestRunner = monitorTestRunner;
         this.secretCipher = secretCipher;
@@ -513,6 +518,10 @@ public class AdminService {
 
         monitor = monitors.save(monitor); // 第一次寫入：拿到 id，此時尚未帶 header／secret
 
+        // W16：站台登入。與 header 一樣是「另外一件事」，不塞進建構子參數列。
+        applyLogin(monitor, request.loginId(), now);
+        monitor = monitors.save(monitor);
+
         if (request.headers() != null && !request.headers().isEmpty()) {
             applyEncryptedHeaders(monitor, request.headers(), now);
             monitor = monitors.save(monitor); // 第二次寫入：用剛拿到的 id 當 AAD 加密後回寫
@@ -571,6 +580,11 @@ public class AdminService {
         if (request.headers() != null && !request.headers().isEmpty()) {
             applyEncryptedHeaders(monitor, request.headers(), now);
         }
+
+        // 站台登入是 PUT 整份取代的一部分：null 代表「這個監控不需要登入」，
+        // 與 header 的「留空 = 不變更」不同——下拉選單一定會送出目前的選擇，
+        // 沒有「沒填」這種狀態。
+        applyLogin(monitor, request.loginId(), now);
 
         monitor = monitors.save(monitor);
         // secret 逐筆「留空 = 不變更」（同 header 的既有慣例），已在 nonBlankEntries 過濾過。
@@ -843,7 +857,31 @@ public class AdminService {
                 parseExtractRules(monitor.getExtractRules()),
                 headerNames(monitor),
                 monitorSecretService.listNames(monitor.getId()),
-                parseComputedFields(monitor.getComputedFields()));
+                parseComputedFields(monitor.getComputedFields()),
+                loginNameOf(monitor));
+    }
+
+    /** 列表要顯示登入名稱而不是 id。找不到（例如剛被刪掉）就顯示 null，前端自行代換。 */
+    private String loginNameOf(ApiMonitor monitor) {
+        if (monitor.getLoginId() == null) {
+            return null;
+        }
+        return monitorLogins.findById(monitor.getLoginId())
+                .map(MonitorLogin::getName)
+                .orElse(null);
+    }
+
+    /**
+     * 設定監控要用的站台登入。
+     *
+     * <p>指向不存在的登入會讓監控每一輪都失敗，而且錯誤訊息出現在輪詢紀錄裡、
+     * 不在存檔當下——所以在這裡就擋掉。
+     */
+    private void applyLogin(ApiMonitor monitor, Long loginId, Instant now) {
+        if (loginId != null && !monitorLogins.existsById(loginId)) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR, "登入設定不存在: " + loginId);
+        }
+        monitor.applyLogin(loginId, now);
     }
 
     /**

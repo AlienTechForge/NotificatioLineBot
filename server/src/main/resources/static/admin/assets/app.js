@@ -59,7 +59,7 @@
 
     // --------------------------------------------------------------- 狀態
 
-    const state = { clients: [], users: [], monitors: [], sessions: [], loaded: {} };
+    const state = { clients: [], users: [], monitors: [], sessions: [], logins: [], loaded: {} };
 
     // --------------------------------------------------------------- 提示
 
@@ -101,6 +101,7 @@
         history: { title: '發送紀錄', sub: '最新 100 筆', load: loadHistory },
         users: { title: '使用者', sub: '管理 owner 標記', load: loadUsers },
         monitors: { title: '監控', sub: '定時打 API、有變更才通知', load: loadMonitors },
+        logins: { title: '站台登入', sub: '帳密自動登入，取得會過期的 token', load: loadLogins },
         sessions: { title: '登入狀態', sub: '依 host 共用的 cookie jar', load: loadSessions },
     };
 
@@ -838,6 +839,7 @@
         $('monNotifyOnFailure').checked = true;
         $('monHeaders').value = '';
         renderHeadersCurrentHint(null);
+        fillLoginSelect(null);
         templatePristine = true;
         setRuleRows([]);
         setSecretsExisting([]);
@@ -877,6 +879,7 @@
         $('monMaxPerDay').value = m.maxNotificationsPerDay != null ? m.maxNotificationsPerDay : '';
         $('monEnabled').checked = m.enabled;
         $('monNotifyOnFailure').checked = m.notifyOnFailure;
+        fillLoginSelect(m.loginId);
         clearTestResult();
         syncMonitorMethod();
         syncMonitorCompareMode();
@@ -1530,6 +1533,8 @@
             notifyOnFailure: $('monNotifyOnFailure').checked,
             cooldownSeconds: Number($('monCooldown').value || 0),
             maxNotificationsPerDay: $('monMaxPerDay').value.trim() ? Number($('monMaxPerDay').value) : null,
+            // 空字串 = 「不需要登入」，要送 null 而不是 ''——後端收到 '' 會當成格式錯誤
+            loginId: $('monLogin').value ? Number($('monLogin').value) : null,
         };
     }
 
@@ -2120,6 +2125,230 @@
         body.append(wrap);
     }
 
+
+    // ============================================================ 站台登入
+    //
+    // 見 Docs/plan/15-監控站台登入設計.md。這一頁管理的是「帳密」，跟隔壁的
+    // 「登入狀態」（cookie jar）是兩件事：cookie jar 是使用者自己貼進來的、過期要重貼；
+    // 這裡的登入會自己去換新的 token，不需要人介入。
+
+    let editingLogin = null;
+
+    async function loadLogins() {
+        try {
+            state.logins = await call('/logins');
+            renderLogins();
+        } catch (e) { pageError('載入失敗：' + e.message); }
+    }
+
+    function renderLogins() {
+        const body = $('loginRows');
+        body.replaceChildren(...state.logins.map(loginRow));
+        $('loginsEmpty').hidden = state.logins.length !== 0;
+    }
+
+    /**
+     * token 狀態徽章。刻意不只用顏色分辨（§1 color-not-only）——文字本身就說明了狀態，
+     * 顏色只是加強。
+     */
+    function tokenStateCell(l) {
+        const cell = el('td');
+        const span = el('span', 'token-state');
+        if (!l.tokenExpiresAt) {
+            span.classList.add('token-state--none');
+            span.textContent = '尚未登入';
+        } else {
+            const expires = new Date(l.tokenExpiresAt).getTime();
+            const minutes = Math.round((expires - Date.now()) / 60000);
+            if (minutes > 0) {
+                span.classList.add('token-state--ok');
+                span.textContent = '有效，剩 ' + minutes + ' 分';
+            } else {
+                span.classList.add('token-state--stale');
+                span.textContent = '已過期，下次抓取時自動重登';
+            }
+        }
+        cell.append(span);
+        return cell;
+    }
+
+    function loginRow(l) {
+        const tr = el('tr');
+        tr.append(td(l.name));
+        tr.append(tdMono(l.username));
+        tr.append(tokenStateCell(l));
+        tr.append(tdNum(l.monitorCount));
+        tr.append(td(fmtTime(l.lastLoginAt)));
+
+        const stateTd = el('td');
+        if (l.enabled) {
+            stateTd.append(el('span', 'tag tag--active', '啟用中'));
+        } else {
+            // 停用幾乎都是密碼錯造成的自動停用，把原因直接顯示出來，不要讓使用者去猜
+            const wrap = el('div');
+            wrap.append(el('span', 'tag tag--muted', '已停用'));
+            if (l.lastError) wrap.append(el('p', 'hint', l.lastError));
+            stateTd.append(wrap);
+        }
+        tr.append(stateTd);
+
+        const act = el('td');
+        const wrap = el('div', 'row-actions');
+        wrap.append(iconBtn('編輯', () => openLoginEdit(l)));
+        wrap.append(iconBtn('測試登入', () => testLogin(l.id)));
+        wrap.append(iconBtn('刪除', () => deleteLogin(l), 'btn--danger'));
+        act.append(wrap);
+        tr.append(act);
+        return tr;
+    }
+
+    function openLoginCreate() {
+        editingLogin = null;
+        $('loginTitle').textContent = '新增站台登入';
+        $('loginError').hidden = true;
+        $('loginForm').reset();
+        $('loginHeaderName').value = 'Authorization';
+        $('loginHeaderTemplate').value = '{token}';
+        $('loginEnabled').checked = true;
+        $('loginPassword').required = true;
+        $('loginPasswordHint').textContent = '建立時必填。';
+        // 還沒有 id 就沒有東西可以測——按鈕留著但停用，比整個藏起來更好懂（§8 disabled-states）
+        $('loginTestBtn').disabled = true;
+        $('loginTestHint').textContent = '先儲存才能測試。';
+        $('loginTestResult').hidden = true;
+        $('loginDialog').showModal();
+    }
+
+    function openLoginEdit(l) {
+        editingLogin = l;
+        $('loginTitle').textContent = '編輯站台登入：' + l.name;
+        $('loginError').hidden = true;
+        $('loginName').value = l.name;
+        $('loginRegion').value = l.region || '';
+        $('loginUserPoolId').value = l.userPoolId || '';
+        $('loginClientId').value = l.clientId || '';
+        $('loginUsername').value = l.username || '';
+        $('loginPassword').value = '';
+        $('loginPassword').required = false;
+        $('loginPasswordHint').textContent = l.hasPassword
+            ? '已設定。留空 = 不變更；填入新密碼會同時作廢目前的 token。'
+            : '尚未設定，請填入密碼。';
+        $('loginHeaderName').value = l.headerName || 'Authorization';
+        $('loginHeaderTemplate').value = l.headerValueTemplate || '{token}';
+        $('loginEnabled').checked = l.enabled;
+        $('loginTestBtn').disabled = false;
+        $('loginTestHint').textContent = '會實際登入一次，不吃 token 快取。';
+        $('loginTestResult').hidden = true;
+        $('loginDialog').showModal();
+    }
+
+    async function submitLogin(event) {
+        event.preventDefault();
+        $('loginError').hidden = true;
+
+        const payload = {
+            name: $('loginName').value.trim(),
+            region: $('loginRegion').value.trim(),
+            userPoolId: $('loginUserPoolId').value.trim(),
+            clientId: $('loginClientId').value.trim(),
+            username: $('loginUsername').value.trim(),
+            password: $('loginPassword').value,
+            headerName: $('loginHeaderName').value.trim() || 'Authorization',
+            headerValueTemplate: $('loginHeaderTemplate').value.trim() || '{token}',
+        };
+
+        try {
+            if (editingLogin) {
+                payload.enabled = $('loginEnabled').checked;
+                await call('/logins/' + editingLogin.id, { method: 'PUT', body: JSON.stringify(payload) });
+                toast('已更新');
+            } else {
+                if (!payload.password) {
+                    showLoginFormError('建立時必須填密碼。');
+                    return;
+                }
+                await call('/logins', { method: 'POST', body: JSON.stringify(payload) });
+                toast('已建立');
+            }
+            $('loginDialog').close();
+            await loadLogins();
+        } catch (e) {
+            showLoginFormError(e.message);
+        }
+    }
+
+    function showLoginFormError(message) {
+        const box = $('loginError');
+        box.textContent = message;
+        box.hidden = false;
+    }
+
+    async function testLogin(id) {
+        const box = $('loginTestResult');
+        const btn = $('loginTestBtn');
+        btn.disabled = true;
+        box.hidden = false;
+        box.className = 'notice notice--info';
+        box.textContent = '登入中…';
+        try {
+            const result = await call('/logins/' + id + '/test', { method: 'POST' });
+            if (result.success) {
+                box.className = 'notice notice--success';
+                box.textContent = '登入成功。Token 有效至 ' + fmtTime(result.tokenExpiresAt) + '。';
+            } else {
+                box.className = 'notice notice--error';
+                box.textContent = '登入失敗：' + result.error;
+            }
+            await loadLogins();
+        } catch (e) {
+            box.className = 'notice notice--error';
+            box.textContent = '測試失敗：' + e.message;
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function deleteLogin(l) {
+        const affected = l.monitorCount > 0
+            ? `\n\n有 ${l.monitorCount} 個監控正在用它，刪除後那些監控會因為拿不到 token 而開始失敗。`
+            : '';
+        if (!confirm(`刪除「${l.name}」？此動作不可回復。${affected}`)) return;
+        try {
+            await call('/logins/' + l.id, { method: 'DELETE' });
+            toast('已刪除');
+            await loadLogins();
+        } catch (e) { toast(e.message, true); }
+    }
+
+    /**
+     * 填入監控表單的「站台登入」下拉。
+     *
+     * <p>清單可能還沒載入過（使用者直接開監控頁就按新增），所以這裡自己抓一次；
+     * 失敗時保留「不需要登入」這個選項就好，不要讓整個監控表單開不起來。
+     */
+    async function fillLoginSelect(selectedId) {
+        const select = $('monLogin');
+        const render = () => {
+            select.replaceChildren();
+            select.append(new Option('不需要登入', ''));
+            state.logins.forEach((l) => {
+                const label = l.enabled ? l.name : l.name + '（已停用）';
+                select.append(new Option(label, String(l.id)));
+            });
+            select.value = selectedId != null ? String(selectedId) : '';
+        };
+
+        if (!state.logins.length) {
+            try {
+                state.logins = await call('/logins');
+            } catch (e) {
+                render();
+                return;
+            }
+        }
+        render();
+    }
+
     // ============================================================ 登入狀態
 
     async function loadSessions() {
@@ -2371,6 +2600,10 @@
     $('monTestBtn').addEventListener('click', testMonitorNow);
     $('monRetestBtn').addEventListener('click', retestMonitorNow);
     $('monitorRunsClose').addEventListener('click', () => $('monitorRunsDialog').close());
+    $('addLogin').addEventListener('click', openLoginCreate);
+    $('loginForm').addEventListener('submit', submitLogin);
+    $('loginCancel').addEventListener('click', () => $('loginDialog').close());
+    $('loginTestBtn').addEventListener('click', () => { if (editingLogin) testLogin(editingLogin.id); });
     $('monTemplate').addEventListener('input', () => { templatePristine = false; });
     wireAutocomplete($('monTemplate'), messageVarEntries);
     wireAutocomplete($('monUrl'), requestTemplateVarEntries);

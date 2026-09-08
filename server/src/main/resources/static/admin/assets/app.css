@@ -731,3 +731,159 @@ dialog::backdrop { background: rgb(4 8 16 / 0.55); backdrop-filter: blur(3px); }
     .topbar { padding: var(--sp-4); }
     .topbar__eyebrow { display: none; }
 }
+
+/* ==========================================================================
+   表單分組（doc 15 §9）
+   ==========================================================================
+   問題：監控抽屜有 15 個以上的欄位平鋪在同一層，每個底下再掛一段長說明，
+   使用者看到的是一片密度均勻的文字牆，無法一眼分辨「哪些欄位是一組」、
+   「哪些是現在非填不可的、哪些是進階選項」。
+
+   解法兩件事：
+     1. 語意分組 —— 相關欄位包進同一個 .form-section，段落之間留白比段落內大，
+        讓群組關係靠間距成立（而不是靠使用者自己讀標籤推論）。
+     2. 漸進揭露 —— 少數人才會用到的（簽章、防洗版）用 <details> 收起來，
+        預設只露出標題與一句話摘要。不是把資訊刪掉，是不要一次全倒出來。
+
+   說明文字一律限寬 68ch：一行 100+ 字的說明沒有人會讀完。
+   ========================================================================== */
+
+.form-section {
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--c-surface-2) 35%, transparent);
+    padding: var(--sp-4);
+    margin-bottom: var(--sp-5);
+}
+
+/* 群組內最後一個欄位不需要下邊距——外層的 padding 已經負責留白了 */
+.form-section > .field:last-child,
+.form-section > .form-row:last-child .field,
+.form-section__body > .field:last-child {
+    margin-bottom: 0;
+}
+
+.form-section__head {
+    margin-bottom: var(--sp-4);
+}
+
+.form-section__title {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    margin: 0;
+    font-size: 14px;
+    font-weight: 650;
+    color: var(--c-fg);
+}
+
+/* 編號讓「這是第幾步」看得出來，掃視時比純標題快 */
+.form-section__num {
+    display: inline-grid;
+    place-items: center;
+    inline-size: 20px;
+    block-size: 20px;
+    border-radius: 999px;
+    background: var(--c-accent-soft);
+    color: var(--c-accent);
+    font-size: 11px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    flex: none;
+}
+
+.form-section__desc {
+    margin: var(--sp-1) 0 0;
+    font-size: 12px;
+    color: var(--c-fg-muted);
+    max-inline-size: 68ch;
+}
+
+/* --- 可收合變體 ------------------------------------------------------- */
+
+details.form-section > summary {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    cursor: pointer;
+    list-style: none;
+    /* summary 本身就是可點區域，補足 44px 的高度而不是只有文字那一行 */
+    min-block-size: 28px;
+}
+
+details.form-section > summary::-webkit-details-marker { display: none; }
+
+details.form-section > summary:focus-visible {
+    outline: 2px solid var(--c-ring);
+    outline-offset: 3px;
+    border-radius: var(--radius-sm);
+}
+
+details.form-section > summary .form-section__chev {
+    margin-inline-start: auto;
+    flex: none;
+    color: var(--c-fg-muted);
+    transition: transform var(--motion);
+}
+
+details.form-section[open] > summary .form-section__chev {
+    transform: rotate(180deg);
+}
+
+details.form-section[open] > summary {
+    margin-bottom: var(--sp-4);
+}
+
+/* 收合狀態下的一句話摘要：告訴使用者裡面有什麼，才有理由展開 */
+.form-section__summary {
+    font-size: 12px;
+    color: var(--c-fg-muted);
+    font-weight: 400;
+}
+
+/* --- 長說明改成按需展開 ------------------------------------------------ */
+
+.hint { max-inline-size: 68ch; }
+
+.hint-more { margin-top: var(--sp-1); }
+
+.hint-more > summary {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    font-size: 12px;
+    color: var(--c-accent);
+    cursor: pointer;
+    list-style: none;
+}
+
+.hint-more > summary::-webkit-details-marker { display: none; }
+
+.hint-more > summary::before { content: '?'; font-weight: 700; }
+
+.hint-more > summary:focus-visible {
+    outline: 2px solid var(--c-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+}
+
+.hint-more > .hint { margin-top: var(--sp-2); }
+
+/* --- 狀態徽章（站台登入的 token 狀態） --------------------------------- */
+
+.token-state {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* 色彩不是唯一的訊息載體：文字本身已經說明狀態（§1 color-not-only） */
+.token-state--ok    { color: var(--c-success); }
+.token-state--stale { color: var(--c-warning); }
+.token-state--none  { color: var(--c-fg-muted); }
+
+@media (prefers-reduced-motion: reduce) {
+    details.form-section > summary .form-section__chev { transition: none; }
+}

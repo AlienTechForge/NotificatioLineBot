@@ -63,6 +63,16 @@ public class ApiMonitor {
     @Column(name = "headers_key_version")
     private Integer headersKeyVersion;
 
+    /**
+     * 引用的 {@code monitor_login}，null = 這個監控不需要登入。
+     *
+     * <p>只存 id 而非 {@code @ManyToOne}：取件（{@code claim}）刻意只讀不可變快照，
+     * 拿著關聯 entity 到交易外會踩上 {@code ClaimedMonitor} 類別註解說的
+     * lazy loading 問題。token 由 {@code SiteLoginService} 在執行當下另外取得。
+     */
+    @Column(name = "login_id")
+    private Long loginId;
+
     // ------------------------------------------------------------------ 排程
 
     @Column(name = "interval_seconds", nullable = false)
@@ -309,6 +319,10 @@ public class ApiMonitor {
 
     public Integer getHeadersKeyVersion() {
         return headersKeyVersion;
+    }
+
+    public Long getLoginId() {
+        return loginId;
     }
 
     public int getIntervalSeconds() {
@@ -565,6 +579,18 @@ public class ApiMonitor {
         this.headersCiphertext = ciphertext == null ? null : ciphertext.clone();
         this.headersIv = iv == null ? null : iv.clone();
         this.headersKeyVersion = keyVersion;
+        this.updatedAt = now;
+    }
+
+    /**
+     * 設定（或清除）這個監控要用的站台登入。
+     *
+     * <p>刻意<strong>不</strong>塞進 {@link #applyUpdate} 的參數列：那個方法已經有
+     * 15 個參數，而登入設定與 header 一樣是「另外一件事」——{@link #applyHeaders}
+     * 獨立存在也是同一個理由。{@code null} 代表這個監控不需要登入。
+     */
+    public void applyLogin(Long loginId, Instant now) {
+        this.loginId = loginId;
         this.updatedAt = now;
     }
 

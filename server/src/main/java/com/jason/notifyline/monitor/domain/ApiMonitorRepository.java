@@ -13,6 +13,10 @@ import java.util.List;
 
 public interface ApiMonitorRepository extends JpaRepository<ApiMonitor, Long> {
 
+    /** W16：後台刪除站台登入前要顯示「會影響幾個監控」。 */
+    int countByLoginId(Long loginId);
+
+
     /**
      * 排程器取件。抄 {@code NotificationDeliveryRepository.lockPending} 的做法。
      *
