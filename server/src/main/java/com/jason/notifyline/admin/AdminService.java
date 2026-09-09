@@ -651,6 +651,10 @@ public class AdminService {
      * {@code {{ ... }}} 佔位符在送出前先替換，跟排程輪詢（{@code ApiMonitorRunner}）
      * 是同一份替換邏輯，讓「立即測試」看到的結果跟實際排程會打出去的請求一致。
      *
+     * <p><strong>站台登入（W16）</strong>：{@code request.loginId()} 一併傳給
+     * {@link ApiMonitorTestRunner}，理由同上一段——試跑要預覽的是排程實際會送出的請求，
+     * 少了 token 就不是同一個請求。見該類別註解「站台登入（W16）」。
+     *
      * <p><strong>計算欄位（W13）</strong>：{@code request.computedFields()} 用
      * {@link ComputedFieldEvaluator} 求一次值，跟 URL／header／body 共用同一個
      * {@link RequestTemplate.Session}（凍結時間戳，見 {@code Docs/plan/13-監控計算欄位設計.md}
@@ -681,7 +685,8 @@ public class AdminService {
         ApiMonitorTestRunner.TestConfig config = new ApiMonitorTestRunner.TestConfig(
                 name == null ? "(測試)" : name, uri, request.method(), renderedBody, renderedHeaders,
                 request.compareMode(), request.extractRules(),
-                request.itemPointer(), request.itemKeyPointer(), request.messageTemplate(), computedValues);
+                request.itemPointer(), request.itemKeyPointer(), request.messageTemplate(), computedValues,
+                request.loginId());
 
         return AdminDto.MonitorTestResult.from(monitorTestRunner.run(config));
     }

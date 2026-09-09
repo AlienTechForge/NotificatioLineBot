@@ -6,6 +6,9 @@ import com.jason.notifyline.monitor.domain.ExtractRule;
 import com.jason.notifyline.monitor.fetch.ApiFetcher;
 import com.jason.notifyline.monitor.fetch.FetchResult;
 import com.jason.notifyline.monitor.fetch.OutboundUrlGuard;
+import com.jason.notifyline.monitor.login.CognitoAuthException;
+import com.jason.notifyline.monitor.login.ResolvedLoginHeader;
+import com.jason.notifyline.monitor.login.SiteLoginService;
 import com.jason.notifyline.monitor.parse.ChangeDetector;
 import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
@@ -17,6 +20,7 @@ import org.springframework.stereotype.Service;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -66,6 +70,21 @@ import java.util.Set;
  * CSRF token），這裡就讓它被丟棄，不去動 jar；下一次排程輪詢仍然用同一份儲存的
  * 登入狀態，行為可預期。
  *
+ * <h2>站台登入（W16）：同樣要注入，理由與 cookie jar 一字不差</h2>
+ *
+ * <p>上面那段「不附加登入狀態，對排程會成功的監控在試跑時會回 401，使用者會誤以為
+ * 設定壞了」——站台登入加進來時漏了跟上，於是那句話真的發生了一次：設定了站台登入、
+ * 又（正確地）把手貼的過期 {@code authorization} 刪掉之後，試跑變成完全沒有認證
+ * header，必然 401，而排程其實是好的。所以 {@link TestConfig#loginId} 存在，並在
+ * 這裡走跟 {@link ApiMonitorRunner#execute} 相同的注入邏輯（含大小寫不敏感的移除）。
+ *
+ * <p><strong>這一步會更新 token 快取，那是可接受的副作用</strong>——與
+ * {@code mergeSetCookies} 的差別在方向：合併 {@code Set-Cookie} 是<em>換掉</em>排程依賴
+ * 的登入狀態（破壞既有的可預期性），而 {@link SiteLoginService#resolve} 只是把
+ * 「取得一顆可用 token」的結果存起來，排程接著就能用同一顆，正是它本來就要做的事。
+ * 反過來若刻意避開快取每次都重新登入，代價是每按一次測試就多送一次帳密給 Cognito，
+ * 把使用者推向帳號鎖定門檻——那才是真正該防的副作用。
+ *
  * <h2>成功時回傳原始 body（截斷至 {@value #MAX_TEST_BODY_BYTES} 位元組）</h2>
  *
  * <p>見 {@code Docs/plan/12-API監控易用性升級.md} §4.2：後台要把試跑抓到的回應渲染成
@@ -96,17 +115,20 @@ public class ApiMonitorTestRunner {
     private final OutboundUrlGuard guard;
     private final ApiFetcher fetcher;
     private final SiteSessionService siteSessionService;
+    private final SiteLoginService siteLoginService;
     private final ChangeDetector changeDetector;
     private final MessageTemplate messageTemplate;
 
     public ApiMonitorTestRunner(OutboundUrlGuard guard,
                                 ApiFetcher fetcher,
                                 SiteSessionService siteSessionService,
+                                SiteLoginService siteLoginService,
                                 ChangeDetector changeDetector,
                                 MessageTemplate messageTemplate) {
         this.guard = guard;
         this.fetcher = fetcher;
         this.siteSessionService = siteSessionService;
+        this.siteLoginService = siteLoginService;
         this.changeDetector = changeDetector;
         this.messageTemplate = messageTemplate;
     }
@@ -129,8 +151,26 @@ public class ApiMonitorTestRunner {
             headersWithCookies = config.headers();
         }
 
+        // 站台登入：與 cookie jar 相反，這裡的失敗不可吞掉繼續打——沒有 token 的請求
+        // 必然 401，而那個 401 會把使用者的注意力導向網址或 header，實際上請求根本
+        // 還沒送出去。理由與 ApiMonitorRunner.execute 的 LOGIN_ERROR 分支相同。
+        Map<String, String> headersWithLogin = headersWithCookies;
+        if (config.loginId() != null) {
+            try {
+                ResolvedLoginHeader loginHeader = siteLoginService.resolve(config.loginId());
+                headersWithLogin = new LinkedHashMap<>(headersWithCookies);
+                // 大小寫不敏感的移除，理由見 ApiMonitorRunner.execute 同一段：Map 的 key
+                // 分大小寫、HTTP 的 header 名稱不分，少了這一步兩筆都會送出去。
+                headersWithLogin.keySet().removeIf(name -> name.equalsIgnoreCase(loginHeader.name()));
+                headersWithLogin.put(loginHeader.name(), loginHeader.value());
+            } catch (CognitoAuthException e) {
+                // e.getMessage() 只含 Cognito 的錯誤型別與說明，不含帳密或 token。
+                return new MonitorTestOutcome.LoginFailed(e.reason().name(), e.getMessage());
+            }
+        }
+
         FetchResult fetchResult = fetcher.fetch(new ApiFetcher.FetchRequest(
-                config.uri(), config.method(), config.requestBody(), headersWithCookies));
+                config.uri(), config.method(), config.requestBody(), headersWithLogin));
         if (fetchResult instanceof FetchResult.Failure failure) {
             return new MonitorTestOutcome.FetchFailed(
                     failure.reason().name(), failure.detail(), failure.httpStatus());
@@ -241,6 +281,9 @@ public class ApiMonitorTestRunner {
      *                       {@code {{computed.NAME}}}，這裡只是單純把值原樣帶進
      *                       {@link MonitorTestOutcome.Success} 供試算面板顯示，不會在這個
      *                       類別裡重新求值
+     * @param loginId        表單上選的站台登入；{@code null} 代表不需要登入。試跑必須跟排程
+     *                       用同一組設定，否則預覽的就不是排程實際會打出去的請求——見類別
+     *                       註解「站台登入（W16）」
      */
     public record TestConfig(
             String name,
@@ -253,7 +296,8 @@ public class ApiMonitorTestRunner {
             String itemPointer,
             String itemKeyPointer,
             String messageTemplate,
-            Map<String, String> computedValues) {
+            Map<String, String> computedValues,
+            Long loginId) {
 
         public TestConfig {
             headers = headers == null ? Map.of() : Map.copyOf(headers);
@@ -261,12 +305,20 @@ public class ApiMonitorTestRunner {
             computedValues = computedValues == null ? Map.of() : Map.copyOf(computedValues);
         }
 
+        /** 不涉及站台登入的呼叫端的簡便建構子：{@code loginId} 預設 {@code null}。 */
+        public TestConfig(String name, URI uri, String method, String requestBody, Map<String, String> headers,
+                          CompareMode compareMode, List<ExtractRule> extractRules, String itemPointer,
+                          String itemKeyPointer, String messageTemplate, Map<String, String> computedValues) {
+            this(name, uri, method, requestBody, headers, compareMode, extractRules, itemPointer, itemKeyPointer,
+                    messageTemplate, computedValues, null);
+        }
+
         /** 舊有呼叫端（不涉及計算欄位的既有測試）的簡便建構子：{@code computedValues} 預設空。 */
         public TestConfig(String name, URI uri, String method, String requestBody, Map<String, String> headers,
                           CompareMode compareMode, List<ExtractRule> extractRules, String itemPointer,
                           String itemKeyPointer, String messageTemplate) {
             this(name, uri, method, requestBody, headers, compareMode, extractRules, itemPointer, itemKeyPointer,
-                    messageTemplate, Map.of());
+                    messageTemplate, Map.of(), null);
         }
     }
 }

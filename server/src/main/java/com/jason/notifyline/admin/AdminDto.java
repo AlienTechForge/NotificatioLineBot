@@ -674,15 +674,22 @@ public final class AdminDto {
 
             @NotBlank(message = "messageTemplate is required") String messageTemplate,
 
-            Long monitorId) {
+            Long monitorId,
 
-        /** 舊有呼叫端（不涉及 secret／計算欄位的既有測試）的簡便建構子。 */
+            /**
+             * 表單上選的站台登入；{@code null} 代表不需要登入。試跑必須跟排程用同一組
+             * 設定，否則預覽的不是排程實際會打出去的請求——見 {@code ApiMonitorTestRunner}
+             * 類別註解「站台登入（W16）」。
+             */
+            Long loginId) {
+
+        /** 舊有呼叫端（不涉及 secret／計算欄位／站台登入的既有測試）的簡便建構子。 */
         public MonitorTestRequest(String name, String url, String method, String requestBody,
                                   Map<String, String> headers, CompareMode compareMode,
                                   List<ExtractRule> extractRules, String itemPointer, String itemKeyPointer,
                                   String messageTemplate) {
             this(name, url, method, requestBody, headers, Map.of(), compareMode, extractRules, itemPointer,
-                    itemKeyPointer, List.of(), messageTemplate, null);
+                    itemKeyPointer, List.of(), messageTemplate, null, null);
         }
     }
 
@@ -733,6 +740,9 @@ public final class AdminDto {
                 case MonitorTestOutcome.FetchFailed f -> new MonitorTestResult(
                         false, f.httpStatus(), f.reason(), f.detail(), Map.of(), List.of(), null, null, false, 0,
                         Map.of());
+                case MonitorTestOutcome.LoginFailed l -> new MonitorTestResult(
+                        false, null, "LOGIN_ERROR（站台登入）", l.reason() + ": " + l.message(),
+                        Map.of(), List.of(), null, null, false, 0, Map.of());
                 case MonitorTestOutcome.ParseFailed p -> new MonitorTestResult(
                         false, null, "PARSE_ERROR", p.detail(), Map.of(), List.of(), null, null, false, 0, Map.of());
                 case MonitorTestOutcome.Success s -> new MonitorTestResult(
