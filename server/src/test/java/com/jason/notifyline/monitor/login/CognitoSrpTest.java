@@ -35,6 +35,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p><strong>這仍然不能證明對真實 Cognito 有效</strong>：兩個實作可能共享同一個對
  * 協定的誤解。它能抓到的是 padding、位元組順序、截斷長度這類實作錯誤，也就是
  * 實務上最容易出的那些。最終真相是後台的「測試登入」按鈕跑一次真的登入。
+ *
+ * <p>這句警告後來成真了，而且是以最鈍的方式：兩邊抄的 N 都少了 80 個 hex 字元。
+ * 共享的不是「誤解」，是同一段被抄壞的常數 —— 對拍對這種錯誤完全免疫。補救是
+ * {@link ModulusIsTheRealGroup}：不比對任何抄來的字串，只驗數學性質。凡是「兩邊
+ * 都從同一處抄來」的東西，都要有這樣一個獨立於抄寫的檢查。
  */
 @DisplayName("CognitoSrp")
 class CognitoSrpTest {
@@ -74,8 +79,7 @@ class CognitoSrpTest {
         @Test
         @DisplayName("A = g^a mod N 與參考實作一致")
         void bigAMatches() {
-            BigInteger n = new BigInteger(nHex(), 16);
-            BigInteger computed = BigInteger.TWO.modPow(big("smallAHex"), n);
+            BigInteger computed = BigInteger.TWO.modPow(big("smallAHex"), CognitoSrp.modulus());
 
             assertThat(computed.toString(16)).isEqualTo(s("bigAHex"));
         }
@@ -105,25 +109,66 @@ class CognitoSrpTest {
 
             assertThat(signature).isEqualTo(s("signatureB64"));
         }
+    }
 
-        /** N 只在測試裡需要，正式碼裡是 private——這裡從參考實作的定義重建一份。 */
-        private String nHex() {
-            return "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74"
-                    + "020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F1437"
-                    + "4FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED"
-                    + "EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF05"
-                    + "98DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB"
-                    + "9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B"
-                    + "E39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF695581718"
-                    + "3995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D040A99D9"
-                    + "556AE0F19B9F42B54BC9F9BB1F60FEB1EDCEB9D69B70F2ED8B0AE4C0D2AABB48"
-                    + "0C34C0F3D5E9C2CD9A8F44F1F1B2B8CE1CE6BD8FF67F1CDC1EFDD5C8B4D0DA0F"
-                    + "43DB5BFCE0FD108E4B82D120A93AD2CAFFFFFFFFFFFFFFFF";
+    /**
+     * 對拍測試唯一漏掉的東西：<strong>N 這個常數本身</strong>。
+     *
+     * <p>第一版的 N 少抄了 80 個 hex 字元（2752 bits 而非 3072）。上面那三個對拍
+     * 測試全綠，因為 {@code srp_ref.py} 抄的是同一串字 —— 兩個實作各自算得都對，
+     * 只是算的不是 Cognito 用的那個群組。線上的症狀是每次登入都拿到
+     * {@code NotAuthorizedException: Incorrect username or password}，而密碼是對的。
+     *
+     * <p>所以這裡不比對字串（再抄一份只是把錯誤複製第三次），改成驗證這個數字的
+     * 數學性質。RFC 3526 §4 的 3072-bit MODP Group 是一個 safe prime，形式為
+     * {@code 2^3072 − 2^3008 − 1 + 2^64 · (⌊2^2942 · π⌋ + 1690314)}，最高與最低
+     * 各 64 個位元都是 1。漏抄、多抄、打錯任何一個字元，得到的數字幾乎不可能同時
+     * 還是 3072 bits、還是質數、{@code (N−1)/2} 也還是質數。
+     */
+    @Nested
+    @DisplayName("N 是真的那個群組")
+    class ModulusIsTheRealGroup {
+
+        /** 只是在擋打字錯誤，不是在防惡意輸入；質數判定失敗的機率 < 2^-80。 */
+        private static final int CERTAINTY = 40;
+
+        private final BigInteger n = CognitoSrp.modulus();
+
+        @Test
+        @DisplayName("正好 3072 bits —— 抄漏一段最先在這裡露餡")
+        void isThreeThousandSeventyTwoBits() {
+            assertThat(n.bitLength()).isEqualTo(3072);
+        }
+
+        @Test
+        @DisplayName("是 safe prime：N 與 (N−1)/2 都是質數")
+        void isSafePrime() {
+            assertThat(n.isProbablePrime(CERTAINTY)).as("N 是質數").isTrue();
+            assertThat(n.subtract(BigInteger.ONE).shiftRight(1).isProbablePrime(CERTAINTY))
+                    .as("(N−1)/2 是質數").isTrue();
+        }
+
+        @Test
+        @DisplayName("頭尾各 64 個位元都是 1，這是 RFC 3526 群組的形狀")
+        void hasAllOnesAtBothEnds() {
+            BigInteger allOnes = BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE);
+
+            assertThat(n.and(allOnes)).as("最低 64 bits").isEqualTo(allOnes);
+            assertThat(n.shiftRight(3072 - 64)).as("最高 64 bits").isEqualTo(allOnes);
+        }
+
+        @Test
+        @DisplayName("g = 2 是模 N 的二次剩餘產生器，A 落在合法範圍")
+        void generatorProducesValidPublicValue() {
+            CognitoSrp.KeyPair pair = CognitoSrp.generateKeyPair(new SecureRandom());
+
+            assertThat(pair.bigA()).isGreaterThan(BigInteger.ONE).isLessThan(n);
         }
     }
 
+    /** 第四個坑（N 抄漏）在 {@link ModulusIsTheRealGroup} —— 它需要不同的驗法。 */
     @Nested
-    @DisplayName("三個一定會踩的坑")
+    @DisplayName("一定會踩的坑")
     class KnownTraps {
 
         @Test
