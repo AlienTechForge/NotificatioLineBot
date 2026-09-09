@@ -488,10 +488,14 @@ public class ApiMonitor {
     // ------------------------------------------------------------ 狀態轉換（W4）
 
     /**
-     * 後台編輯（{@code PUT /admin/api/monitors/{id}}）：整份取代設定欄位，執行狀態
-     * （{@code next_run_at}、fingerprint、失敗計數等）完全不動——編輯設定不該讓下一次
-     * 排程時間、比對基準跟著重置，那會讓使用者以為監控「重新開始」而困惑，也會在
-     * 只是想改個 cooldown 秒數時意外把 fingerprint 清掉、白白多發一次通知。
+     * 後台編輯（{@code PUT /admin/api/monitors/{id}}）：整份取代設定欄位。比對基準
+     * （fingerprint、{@code last_state}、{@code seen_item}）完全不動——編輯設定不該讓
+     * 比對基準跟著重置，那會在只是想改個 cooldown 秒數時意外把 fingerprint 清掉、
+     * 白白多發一次通知。
+     *
+     * <p><strong>但退避狀態是例外，見 {@link #clearBackoff}</strong>：正在退避的監控
+     * 存檔後會立刻重試。比對基準與退避是兩件不同的事，早期版本把它們綁在一起，
+     * 結果是使用者修好設定後只能乾等最多 8 小時。
      *
      * <p>Header 不在這裡處理——加密需要先知道 id（見
      * {@code Docs/plan/11-API監控輪詢設計.md} §10 的 AAD 陷阱說明），呼叫端要另外呼叫
@@ -560,7 +564,37 @@ public class ApiMonitor {
         this.cooldownSeconds = cooldownSeconds;
         this.maxNotificationsPerDay = maxNotificationsPerDay;
         this.computedFields = computedFields == null ? "[]" : computedFields;
+        clearBackoff(now);
         this.updatedAt = now;
+    }
+
+    /**
+     * 正在退避的話就清掉，讓下一輪 claim 立刻取到這筆。沒在退避時什麼都不做。
+     *
+     * <p><strong>為什麼存檔與重新啟用要做這件事</strong>：退避的語意是「這個東西壞了，
+     * 別一直撞」。使用者動手改設定、或把停用的監控重新打開，正是在說「我處理過了，
+     * 再試一次」——這時還讓它繼續躲，等於沒有任何辦法叫它重跑。倍數上限是 16，間隔
+     * 1800 秒的監控失敗 5 次後就是 8 小時才動一次；使用者看到的是「它停了」，而且
+     * 改什麼都沒用。
+     *
+     * <p>同一個 codebase 的 {@code MonitorLogin.applyUpdate} 早就是這樣做的
+     * （「重新啟用時歸零失敗計數——使用者剛處理過問題，不該還帶著舊的失敗次數」），
+     * 監控這邊只是沒跟上。
+     *
+     * <p><strong>只清退避，不碰比對基準</strong>：fingerprint / {@code last_state} /
+     * {@code seen_item} 是「上次看到什麼」，跟「壞了幾次」無關。清掉它們會讓下一輪
+     * 把整包內容當成新的而發一則假通知——那正是 {@link #applyUpdate} 原本就要避免的事。
+     *
+     * <p>{@code consecutiveFailures == 0} 時整個方法是 no-op，所以運作正常的監控存檔
+     * 後排程時間不變，不會因為改了個 cooldown 秒數就被拉去立刻執行一次。
+     */
+    private void clearBackoff(Instant now) {
+        if (consecutiveFailures == 0) {
+            return;
+        }
+        this.consecutiveFailures = 0;
+        this.failureNotified = false;
+        this.nextRunAt = now;
     }
 
     /**
@@ -594,8 +628,17 @@ public class ApiMonitor {
         this.updatedAt = now;
     }
 
-    /** 啟用／停用。{@code next_run_at} 不動——理由同 {@link #applyUpdate}。 */
+    /**
+     * 啟用／停用。
+     *
+     * <p>從停用切回啟用時清掉退避（{@link #clearBackoff}）——把監控重新打開是明確的
+     * 「再試一次」，讓它繼續躲在最長 8 小時的退避裡等於這個開關沒有作用。停用方向
+     * 不需要，反正停用的監控本來就不會被 claim。
+     */
     public void setEnabled(boolean enabled, Instant now) {
+        if (enabled && !this.enabled) {
+            clearBackoff(now);
+        }
         this.enabled = enabled;
         this.updatedAt = now;
     }
