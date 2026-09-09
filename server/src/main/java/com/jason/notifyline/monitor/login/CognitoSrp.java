@@ -35,17 +35,23 @@ import java.util.Locale;
  * sig = HMAC-SHA256(key, poolName ‖ username ‖ secretBlock ‖ timestamp)
  * </pre>
  *
- * <h2>三個一定會踩的坑</h2>
+ * <h2>四個一定會踩的坑</h2>
+ *
+ * <p>四個都有同一個症狀：{@code NotAuthorizedException: Incorrect username or password}
+ * ——<strong>而密碼是對的</strong>。這個訊息只代表「簽章對不上」，Cognito 不會、也無法
+ * 告訴你是哪一環算錯了。所以看到它時，先懷疑下面這四件事，不要先叫使用者改密碼。
  *
  * <ol>
  *   <li><strong>{@code username} 必須是 {@code USER_ID_FOR_SRP}</strong>（Cognito 內部
- *       id），不是登入用的 email。用 email 會拿到看起來像密碼錯誤的
- *       {@code NotAuthorizedException}，而密碼其實是對的。</li>
+ *       id），不是登入用的 email。</li>
  *   <li><strong>{@code poolName} 是去掉 region 前綴的部分</strong>：
  *       {@code eu-west-2_FhQHPoX2z} → {@code FhQHPoX2z}。整串丟進去簽章一定對不上。</li>
  *   <li><strong>timestamp 格式固定</strong>：{@code EEE MMM d HH:mm:ss 'UTC' yyyy}、
  *       {@code Locale.US}、UTC 時區、<strong>日期不補零</strong>。用系統預設 locale
  *       會在非英文環境產生 "週二"，簽章直接失敗。</li>
+ *   <li><strong>{@link #N_HEX} 少一個字元都不行</strong>，而且它不會抱怨。這是四個裡面
+ *       最難查的：漏抄的 N 仍是合法的 BigInteger，程式一路跑到底才在 Cognito 那端
+ *       對不上。見該常數的說明。</li>
  * </ol>
  *
  * <h2>{@link #padHex(String)} 的 salt 歧義</h2>
@@ -59,7 +65,20 @@ import java.util.Locale;
  */
 public final class CognitoSrp {
 
-    /** RFC 5054 3072-bit group 的 N。 */
+    /**
+     * RFC 5054 3072-bit group 的 N，即 RFC 3526 §4 的 3072-bit MODP Group（id 15）。
+     *
+     * <p><strong>整整 768 個 hex 字元、3072 bits，一個字元都不能少。</strong>
+     * 這串東西沒有任何自我校驗能力：漏抄中間一段，它仍然是一個合法的 BigInteger，
+     * 所有計算照跑、不拋任何例外，只是算出來的 s 與 Cognito 算的完全不同，於是
+     * {@code PASSWORD_CLAIM_SIGNATURE} 對不上，Cognito 回
+     * {@code NotAuthorizedException: Incorrect username or password} ——
+     * 一個看起來像「密碼打錯」、實際上跟密碼毫無關係的錯誤。這正是第一版發生的事。
+     *
+     * <p>所以 {@code CognitoSrpTest.ModulusIsTheRealGroup} 不比對字串，而是驗證這個
+     * 數字的<strong>數學性質</strong>（3072 bits、safe prime、頭尾各 64 個 1 位元）。
+     * 對拍測試抓不到這種錯 —— 參考實作抄的是同一串字。
+     */
     private static final String N_HEX =
             "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74"
             + "020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F1437"
@@ -68,10 +87,11 @@ public final class CognitoSrp {
             + "98DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB"
             + "9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B"
             + "E39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF695581718"
-            + "3995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D040A99D9"
-            + "556AE0F19B9F42B54BC9F9BB1F60FEB1EDCEB9D69B70F2ED8B0AE4C0D2AABB48"
-            + "0C34C0F3D5E9C2CD9A8F44F1F1B2B8CE1CE6BD8FF67F1CDC1EFDD5C8B4D0DA0F"
-            + "43DB5BFCE0FD108E4B82D120A93AD2CAFFFFFFFFFFFFFFFF";
+            + "3995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D04507A33"
+            + "A85521ABDF1CBA64ECFB850458DBEF0A8AEA71575D060C7DB3970F85A6E1E4C7"
+            + "ABF5AE8CDB0933D71E8C94E04A25619DCEE3D2261AD2EE6BF12FFA06D98A0864"
+            + "D87602733EC86A64521F2B18177B200CBBE117577A615D6C770988C0BAD946E2"
+            + "08E24FA074E5AB3143DB5BFCE0FD108E4B82D120A93AD2CAFFFFFFFFFFFFFFFF";
 
     private static final String G_HEX = "2";
 
@@ -214,6 +234,16 @@ public final class CognitoSrp {
             throw new IllegalArgumentException("userPoolId must look like <region>_<poolName>");
         }
         return userPoolId.substring(underscore + 1);
+    }
+
+    /**
+     * 給測試驗證群組參數用。正式流程不需要 —— N 只在這個類別裡被使用。
+     *
+     * <p>存在的理由是：測試必須能檢查 {@link #N_HEX} 本身，而不是再抄一份去比對
+     * （抄第二份只會把同一個錯誤複製兩次，見 {@link #N_HEX} 的說明）。
+     */
+    static BigInteger modulus() {
+        return N;
     }
 
     // ------------------------------------------------------------------ 內部
