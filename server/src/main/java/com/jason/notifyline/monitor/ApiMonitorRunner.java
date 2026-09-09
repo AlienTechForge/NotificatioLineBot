@@ -259,6 +259,14 @@ public class ApiMonitorRunner {
             try {
                 ResolvedLoginHeader loginHeader = siteLoginService.resolve(monitor.loginId());
                 headersWithLogin = new LinkedHashMap<>(headersWithCookies);
+                // 先移除自訂 header 裡同名的那筆，再放新的。少了這一步，注入的 token
+                // 不會取代它，而是<strong>疊在它後面</strong>：Map 的 key 分大小寫、
+                // HTTP 的 header 名稱不分，所以 "authorization"（使用者從 DevTools 複製
+                // 的樣子——HTTP/2 的 header 名稱一律小寫）與 "Authorization"（這裡注入
+                // 的預設名稱）在 Map 裡是兩個 key，到了 HttpRequest 卻併成同一個名稱的
+                // 兩個值，且過期的那筆排在前面。多數伺服器取第一個 → 401，而錯誤看起來
+                // 會像「自動登入沒生效」，實際上 token 有拿到、只是沒被用上。
+                headersWithLogin.keySet().removeIf(name -> name.equalsIgnoreCase(loginHeader.name()));
                 headersWithLogin.put(loginHeader.name(), loginHeader.value());
             } catch (CognitoAuthException e) {
                 // e.getMessage() 只含 Cognito 的錯誤型別與說明，不含帳密或 token
