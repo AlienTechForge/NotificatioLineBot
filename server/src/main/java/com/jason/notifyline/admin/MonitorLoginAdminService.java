@@ -8,6 +8,7 @@ import com.jason.notifyline.monitor.login.CognitoEndpoint;
 import com.jason.notifyline.monitor.login.LoginType;
 import com.jason.notifyline.monitor.login.MonitorLogin;
 import com.jason.notifyline.monitor.login.MonitorLoginRepository;
+import com.jason.notifyline.monitor.login.MonitorLoginStore;
 import com.jason.notifyline.monitor.login.SiteLoginService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,17 +43,20 @@ public class MonitorLoginAdminService {
     private final MonitorLoginRepository repository;
     private final ApiMonitorRepository monitorRepository;
     private final SiteLoginService siteLoginService;
+    private final MonitorLoginStore loginStore;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
     public MonitorLoginAdminService(MonitorLoginRepository repository,
                                     ApiMonitorRepository monitorRepository,
                                     SiteLoginService siteLoginService,
+                                    MonitorLoginStore loginStore,
                                     ObjectMapper objectMapper,
                                     Clock clock) {
         this.repository = repository;
         this.monitorRepository = monitorRepository;
         this.siteLoginService = siteLoginService;
+        this.loginStore = loginStore;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -92,7 +96,7 @@ public class MonitorLoginAdminService {
 
         // 先存一次只為了拿 id —— 見方法註解
         MonitorLogin saved = repository.saveAndFlush(login);
-        siteLoginService.encryptPasswordInto(saved, request.password());
+        loginStore.encryptPasswordInto(saved, request.password());
         repository.save(saved);
 
         log.info("建立站台登入 id={} name={}", saved.getId(), saved.getName());
@@ -121,7 +125,7 @@ public class MonitorLoginAdminService {
         // 留空 = 不變更。有值時連帶作廢既有 token：它們可能是舊密碼發出的。
         if (request.password() != null && !request.password().isBlank()) {
             login.clearTokens();
-            siteLoginService.encryptPasswordInto(login, request.password());
+            loginStore.encryptPasswordInto(login, request.password());
         }
 
         return toSummary(repository.save(login));
@@ -145,8 +149,13 @@ public class MonitorLoginAdminService {
      * <p>失敗不往外拋，而是包成 {@link AdminDto.LoginTestResult}——這是「測試」按鈕，
      * 使用者期待看到失敗原因，不是一個 500。密碼錯時 {@code SiteLoginService} 已經
      * 依 §5.1 把這組登入停用了，回應裡的 {@code error} 就是要告訴使用者這件事。
+     *
+     * <p><strong>這個方法刻意沒有 {@code @Transactional}。</strong>它的工作是「攔下
+     * 例外、正常回傳」，而 {@code verify()} 內部會拋例外。兩者若共用一個交易，那次
+     * 拋出會把交易標成 rollback-only，這裡正常回傳後在提交時炸
+     * {@code UnexpectedRollbackException} → 500，把真正的失敗原因整個蓋掉。
+     * 這不是假設，是第一版實際發生的線上錯誤，由 {@code AdminLoginTestEndpointIT} 釘住。
      */
-    @Transactional
     public AdminDto.LoginTestResult test(Long id) {
         find(id);
         try {
