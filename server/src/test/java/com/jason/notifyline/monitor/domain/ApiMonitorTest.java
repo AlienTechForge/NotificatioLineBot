@@ -390,12 +390,11 @@ class ApiMonitorTest {
     class ApplyUpdateTest {
 
         @Test
-        @DisplayName("整份取代設定欄位，但不動執行狀態（next_run_at / fingerprint / 失敗計數）")
-        void replacesConfigButNotRuntimeState() {
+        @DisplayName("整份取代設定欄位，比對基準不動（fingerprint 保留）")
+        void replacesConfigButKeepsComparisonBaseline() {
             ApiMonitor monitor = newMonitor("GET", 60, CompareMode.WHOLE_BODY, null, null);
             monitor.applyFingerprint(new byte[]{9, 9}, "{\"x\":\"1\"}");
             monitor.recordFailure(T0.plusSeconds(10), 60);
-            Instant nextRunBefore = monitor.getNextRunAt();
 
             Instant now = T0.plusSeconds(500);
             monitor.applyUpdate(
@@ -416,10 +415,48 @@ class ApiMonitorTest {
             assertThat(monitor.isNotifyOnFailure()).isFalse();
             assertThat(monitor.getUpdatedAt()).isEqualTo(now);
 
-            // 執行狀態完全不受編輯影響——理由見方法註解。
-            assertThat(monitor.getNextRunAt()).isEqualTo(nextRunBefore);
+            // 比對基準不受編輯影響——清掉它會讓下一輪把整包內容當成新的而發假通知。
             assertThat(monitor.getLastFingerprint()).containsExactly(9, 9);
-            assertThat(monitor.getConsecutiveFailures()).isEqualTo(1);
+            assertThat(monitor.getLastState()).isEqualTo("{\"x\":\"1\"}");
+        }
+
+        @Test
+        @DisplayName("正在退避時存檔：清掉退避、立刻可取件——使用者改設定就是在說「再試一次」")
+        void clearsBackoffSoTheFixCanTakeEffectImmediately() {
+            ApiMonitor monitor = newMonitor("GET", 1800, CompareMode.WHOLE_BODY, null, null);
+            // 失敗 5 次 = 退避封頂 ×16：間隔 1800 秒的監控要 8 小時後才會再動一次
+            Instant failedAt = T0.plusSeconds(10);
+            for (int i = 0; i < 5; i++) {
+                monitor.recordFailure(failedAt, 1800);
+            }
+            monitor.markFailureNotified();
+            assertThat(monitor.getNextRunAt()).isEqualTo(failedAt.plusSeconds(1800 * 16));
+
+            Instant now = T0.plusSeconds(500);
+            monitor.applyUpdate(
+                    "renamed", 1L, "https://example.org/fixed", "GET", null,
+                    1800, true, CompareMode.WHOLE_BODY, "[]", null, null,
+                    "{{value.x}}", true, 0, null, now);
+
+            assertThat(monitor.getNextRunAt()).as("立刻可取件").isEqualTo(now);
+            assertThat(monitor.getConsecutiveFailures()).isZero();
+            assertThat(monitor.isFailureNotified()).as("下次真的壞掉時要能再通知一次").isFalse();
+        }
+
+        @Test
+        @DisplayName("沒在退避時存檔：排程時間不動——改個 cooldown 不該把監控拉去立刻執行")
+        void doesNotDisturbScheduleOfAHealthyMonitor() {
+            ApiMonitor monitor = newMonitor("GET", 60, CompareMode.WHOLE_BODY, null, null);
+            monitor.recordSuccess(T0.plusSeconds(10), 60);
+            Instant nextRunBefore = monitor.getNextRunAt();
+
+            monitor.applyUpdate(
+                    "renamed", 1L, "https://example.com/api", "GET", null,
+                    60, true, CompareMode.WHOLE_BODY, "[]", null, null,
+                    "{{value.x}}", true, 30, null, T0.plusSeconds(500));
+
+            assertThat(monitor.getNextRunAt()).isEqualTo(nextRunBefore);
+            assertThat(monitor.getConsecutiveFailures()).isZero();
         }
 
         @Test
@@ -516,6 +553,37 @@ class ApiMonitorTest {
 
             monitor.setEnabled(true, T0.plusSeconds(2));
             assertThat(monitor.isEnabled()).isTrue();
+        }
+
+        @Test
+        @DisplayName("重新啟用退避中的監控：清掉退避，否則這個開關按了等於沒按")
+        void reEnabling_clearsBackoff() {
+            ApiMonitor monitor = newMonitor("GET", 1800, CompareMode.WHOLE_BODY, null, null);
+            for (int i = 0; i < 5; i++) {
+                monitor.recordFailure(T0.plusSeconds(10), 1800);
+            }
+            monitor.setEnabled(false, T0.plusSeconds(20));
+
+            Instant now = T0.plusSeconds(30);
+            monitor.setEnabled(true, now);
+
+            assertThat(monitor.isEnabled()).isTrue();
+            assertThat(monitor.getNextRunAt()).as("立刻可取件").isEqualTo(now);
+            assertThat(monitor.getConsecutiveFailures()).isZero();
+            assertThat(monitor.isFailureNotified()).isFalse();
+        }
+
+        @Test
+        @DisplayName("已經是啟用狀態時再設一次啟用：不動排程——這不是「重新啟用」")
+        void enablingAnAlreadyEnabledMonitor_doesNotDisturbSchedule() {
+            ApiMonitor monitor = newMonitor("GET", 1800, CompareMode.WHOLE_BODY, null, null);
+            monitor.recordFailure(T0.plusSeconds(10), 1800);
+            Instant nextRunBefore = monitor.getNextRunAt();
+
+            monitor.setEnabled(true, T0.plusSeconds(30));
+
+            assertThat(monitor.getNextRunAt()).isEqualTo(nextRunBefore);
+            assertThat(monitor.getConsecutiveFailures()).isEqualTo(1);
         }
     }
 }
