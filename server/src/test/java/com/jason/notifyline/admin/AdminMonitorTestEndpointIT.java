@@ -222,7 +222,7 @@ class AdminMonitorTestEndpointIT extends PostgresIntegrationTest {
         AdminDto.MonitorTestRequest req = new AdminDto.MonitorTestRequest(
                 "dry run", TARGET.url("/api").toString() + "?ts={{now.epochSeconds}}", "GET", null,
                 Map.of("sign", "{{computed.sign}}"), Map.of("appsecret", appsecret, "deviceid", deviceid),
-                CompareMode.WHOLE_BODY, List.of(), null, null, List.of(signField), "{{value.x}}", null);
+                CompareMode.WHOLE_BODY, List.of(), null, null, List.of(signField), "{{value.x}}", null, null);
 
         String responseJson = mockMvc.perform(post("/admin/api/monitors/test")
                         .with(admin()).with(csrf())
