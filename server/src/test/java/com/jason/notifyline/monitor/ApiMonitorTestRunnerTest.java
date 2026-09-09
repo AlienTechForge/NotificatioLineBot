@@ -13,6 +13,9 @@ import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
 import com.jason.notifyline.monitor.session.SiteSession;
 import com.jason.notifyline.monitor.session.SiteSessionRepository;
+import com.jason.notifyline.monitor.login.CognitoAuthException;
+import com.jason.notifyline.monitor.login.ResolvedLoginHeader;
+import com.jason.notifyline.monitor.login.SiteLoginService;
 import com.jason.notifyline.monitor.session.SiteSessionService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -62,6 +65,8 @@ class ApiMonitorTestRunnerTest {
     @Mock
     private SiteSessionService siteSessionService;
     @Mock
+    private SiteLoginService siteLoginService;
+    @Mock
     private ChangeDetector changeDetector;
     @Mock
     private MessageTemplate messageTemplate;
@@ -76,7 +81,7 @@ class ApiMonitorTestRunnerTest {
         // attachCookies，嚴格模式下會被判定成「多餘的 stub」，理由同 ApiMonitorRunnerTest。
         lenient().when(siteSessionService.attachCookies(any(), any()))
                 .thenAnswer(invocation -> invocation.getArgument(1));
-        runner = new ApiMonitorTestRunner(guard, fetcher, siteSessionService, changeDetector, messageTemplate);
+        runner = new ApiMonitorTestRunner(guard, fetcher, siteSessionService, siteLoginService, changeDetector, messageTemplate);
     }
 
     private static ApiMonitorTestRunner.TestConfig config(CompareMode mode) {
@@ -410,7 +415,7 @@ class ApiMonitorTestRunnerTest {
         SiteSession jar = jarFor(cipher, "target.example", Map.of("session", "abc"));
         when(repository.findAll()).thenReturn(List.of(jar));
         ApiMonitorTestRunner runnerWithRealSession = new ApiMonitorTestRunner(
-                guard, fetcher, realSiteSessionService(repository), changeDetector, messageTemplate);
+                guard, fetcher, realSiteSessionService(repository), siteLoginService, changeDetector, messageTemplate);
 
         ApiMonitorTestRunner.TestConfig cfg = config(CompareMode.WHOLE_BODY); // host = target.example
         when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", "{\"status\":\"OK\"}"));
@@ -430,7 +435,7 @@ class ApiMonitorTestRunnerTest {
         SiteSessionRepository repository = mock(SiteSessionRepository.class);
         when(repository.findAll()).thenReturn(List.of());
         ApiMonitorTestRunner runnerWithRealSession = new ApiMonitorTestRunner(
-                guard, fetcher, realSiteSessionService(repository), changeDetector, messageTemplate);
+                guard, fetcher, realSiteSessionService(repository), siteLoginService, changeDetector, messageTemplate);
 
         ApiMonitorTestRunner.TestConfig cfg = config(CompareMode.WHOLE_BODY); // host = target.example，沒有存過 jar
         when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", "{\"status\":\"OK\"}"));
@@ -454,7 +459,7 @@ class ApiMonitorTestRunnerTest {
         SiteSession jar = jarFor(cipher, "target.example", Map.of("session", "abc"));
         when(repository.findAll()).thenReturn(List.of(jar));
         ApiMonitorTestRunner runnerWithRealSession = new ApiMonitorTestRunner(
-                guard, fetcher, realSiteSessionService(repository), changeDetector, messageTemplate);
+                guard, fetcher, realSiteSessionService(repository), siteLoginService, changeDetector, messageTemplate);
 
         byte[] ciphertextBefore = jar.getJarCiphertext();
         Map<String, String> decryptedBefore = decryptJar(cipher, jar);
@@ -478,5 +483,85 @@ class ApiMonitorTestRunnerTest {
         assertThat(decryptedAfter).isEqualTo(decryptedBefore);
         assertThat(decryptedAfter).containsEntry("session", "abc");
         assertThat(decryptedAfter).doesNotContainValue("rotated-by-target");
+    }
+
+    // ------------------------------------------------------------ 站台登入（W16）
+
+    /**
+     * 這一組釘住的是一個真的發生過的缺口：站台登入加進來時，試跑這條路徑沒有跟上。
+     * 使用者設了站台登入、又（正確地）把手貼的過期 authorization 刪掉之後，試跑變成
+     * 完全沒有認證 header，必然 401 —— 而排程其實是好的。
+     */
+    private static ApiMonitorTestRunner.TestConfig configWithLogin(Map<String, String> headers) {
+        return new ApiMonitorTestRunner.TestConfig(
+                "login monitor", URI.create("https://target.example/api"), "GET", null, headers,
+                CompareMode.WHOLE_BODY, List.of(new ExtractRule("status", "/status")), null, null,
+                "{{value.status}}", Map.of(), 42L);
+    }
+
+    private void stubSuccessfulFetchAndParse() {
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", "{\"status\":\"OK\"}"));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), isNull(), isNull()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", "OK"), List.of()));
+    }
+
+    @Test
+    @DisplayName("選了站台登入：試跑也要帶上 token，否則預覽的不是排程會送出的請求")
+    void withLogin_injectsToken() {
+        when(siteLoginService.resolve(42L))
+                .thenReturn(new ResolvedLoginHeader("Authorization", "Bearer FRESH-TOKEN"));
+        stubSuccessfulFetchAndParse();
+
+        MonitorTestOutcome outcome = runner.run(configWithLogin(Map.of("accept", "application/json")));
+
+        assertThat(outcome).isInstanceOf(MonitorTestOutcome.Success.class);
+        ArgumentCaptor<ApiFetcher.FetchRequest> captor = ArgumentCaptor.forClass(ApiFetcher.FetchRequest.class);
+        verify(fetcher).fetch(captor.capture());
+        assertThat(captor.getValue().headers())
+                .containsEntry("Authorization", "Bearer FRESH-TOKEN")
+                .containsEntry("accept", "application/json");
+    }
+
+    @Test
+    @DisplayName("自訂 header 有大小寫不同的同名項目：換掉它，不會兩顆 token 都送出去")
+    void withLogin_replacesCaseInsensitiveDuplicate() {
+        when(siteLoginService.resolve(42L))
+                .thenReturn(new ResolvedLoginHeader("Authorization", "Bearer FRESH-TOKEN"));
+        stubSuccessfulFetchAndParse();
+
+        runner.run(configWithLogin(Map.of("authorization", "Bearer EXPIRED-TOKEN")));
+
+        ArgumentCaptor<ApiFetcher.FetchRequest> captor = ArgumentCaptor.forClass(ApiFetcher.FetchRequest.class);
+        verify(fetcher).fetch(captor.capture());
+        Map<String, String> sent = captor.getValue().headers();
+        assertThat(sent.keySet().stream().filter(k -> k.equalsIgnoreCase("authorization")))
+                .as("同名 header 只能有一個").hasSize(1);
+        assertThat(sent.values()).doesNotContain("Bearer EXPIRED-TOKEN");
+    }
+
+    @Test
+    @DisplayName("登入失敗：回 LoginFailed 且完全不呼叫 fetcher —— 沒 token 的 401 只會誤導")
+    void loginFailure_returnsLoginFailedWithoutFetching() {
+        when(siteLoginService.resolve(42L)).thenThrow(new CognitoAuthException(
+                CognitoAuthException.Reason.INVALID_CREDENTIALS,
+                "NotAuthorizedException: Incorrect username or password."));
+
+        MonitorTestOutcome outcome = runner.run(configWithLogin(Map.of()));
+
+        assertThat(outcome).isInstanceOfSatisfying(MonitorTestOutcome.LoginFailed.class, failed -> {
+            assertThat(failed.reason()).isEqualTo("INVALID_CREDENTIALS");
+            assertThat(failed.message()).contains("NotAuthorizedException");
+        });
+        verify(fetcher, never()).fetch(any());
+    }
+
+    @Test
+    @DisplayName("沒選站台登入：完全不碰 SiteLoginService")
+    void withoutLogin_neverResolves() {
+        stubSuccessfulFetchAndParse();
+
+        runner.run(config(CompareMode.WHOLE_BODY));
+
+        verify(siteLoginService, never()).resolve(any());
     }
 }

@@ -7,7 +7,7 @@ import java.util.Map;
  * {@link ApiMonitorTestRunner#run} 的結果：後台「立即測試」按鈕背後的資料形狀。見
  * {@code Docs/plan/11-API監控輪詢設計.md} §10、§11、{@code Docs/plan/12-API監控易用性升級.md} §4.2。
  *
- * <p>密封成四種情況，呼叫端（{@code AdminService}）用 {@code switch} 窮舉映射成
+ * <p>密封成五種情況，呼叫端（{@code AdminService}）用 {@code switch} 窮舉映射成
  * {@code AdminDto.MonitorTestResult}，不會漏掉某個分支。
  *
  * <h2>{@link Success} 帶原始回應 body——這是刻意放寬的例外，不是疏漏</h2>
@@ -33,6 +33,22 @@ public sealed interface MonitorTestOutcome {
 
     /** 通過 guard 檢查，但抓取本身失敗（逾時、3xx、非 JSON content-type、超過大小上限、4xx/5xx）。 */
     record FetchFailed(String reason, String detail, Integer httpStatus) implements MonitorTestOutcome {
+    }
+
+    /**
+     * 選了站台登入，但取不到 token——完全沒有發出請求。
+     *
+     * <p>獨立於 {@link FetchFailed} 是刻意的：沒有 token 的請求送出去必然是 401，而那個
+     * 401 會讓使用者以為是網址、header 或目標站台的問題，實際上請求根本還沒送出去。
+     * 這正是 {@code ApiMonitorRunner} 把登入失敗記成 {@code LOGIN_ERROR} 而不是讓它變成
+     * 一個 401 的同一個理由。
+     *
+     * @param reason  {@code CognitoAuthException.Reason} 的名稱，例如
+     *                {@code INVALID_CREDENTIALS}、{@code CONFIGURATION}（登入設定已停用）
+     * @param message Cognito 的原文說明；只含錯誤型別與說明，不含帳密或 token——見
+     *                {@code CognitoAuthException} 類別註解
+     */
+    record LoginFailed(String reason, String message) implements MonitorTestOutcome {
     }
 
     /** 抓到回應但不是合法 JSON，或 {@code item_pointer} 沒有指向陣列。{@code detail} 只有分類與長度。 */

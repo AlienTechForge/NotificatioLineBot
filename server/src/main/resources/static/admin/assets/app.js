@@ -1692,7 +1692,9 @@
 
     /** /monitors/test 不吃 clientId/interval/enabled 等排程/發送欄位——試跑不建立排程、不綁定 client、更不會發送，只帶抓取＋解析＋渲染需要的部分。
      *  monitorId：編輯既有監控時帶上，讓後端在計算欄位需要、但這次沒有重新輸入值的 secret 上，改用已存好的值——
-     *  不這樣做的話，每次試算都得把 secret 重新貼一次（見 doc 13 §7 對 MonitorTestRequest 的說明）。 */
+     *  不這樣做的話，每次試算都得把 secret 重新貼一次（見 doc 13 §7 對 MonitorTestRequest 的說明）。
+     *  loginId：站台登入是「抓取需要的部分」，不是排程欄位——少了它，設了站台登入的監控在試跑時
+     *  沒有任何認證 header，必然 401，而排程其實是好的（見 ApiMonitorTestRunner 類別註解）。 */
     function monitorTestBody(form) {
         return {
             name: form.name || null,
@@ -1708,6 +1710,7 @@
             computedFields: form.computedFields,
             messageTemplate: form.messageTemplate,
             monitorId: editingMonitor ? editingMonitor.id : null,
+            loginId: form.loginId,
         };
     }
 
