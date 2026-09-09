@@ -12,6 +12,8 @@ import com.jason.notifyline.monitor.parse.ChangeDetector;
 import com.jason.notifyline.monitor.parse.ChangeResult;
 import com.jason.notifyline.monitor.parse.MessageTemplate;
 import com.jason.notifyline.monitor.request.RequestTemplate;
+import com.jason.notifyline.monitor.login.CognitoAuthException;
+import com.jason.notifyline.monitor.login.ResolvedLoginHeader;
 import com.jason.notifyline.monitor.login.SiteLoginService;
 import com.jason.notifyline.monitor.session.SiteSessionService;
 import org.junit.jupiter.api.BeforeEach;
@@ -412,6 +414,82 @@ class ApiMonitorRunnerTest {
         verify(store).recordFailure(eq(claimed), captor.capture());
         assertThat(captor.getValue().host()).isEqualTo("target.example");
         assertThat(captor.getValue().httpStatus()).isEqualTo(401);
+    }
+
+    // ------------------------------------------------------------ 站台登入的 token 注入（W16）
+
+    /**
+     * 使用者常見的設定：自訂 header 是從瀏覽器 DevTools 複製來的，所以
+     * {@code authorization} 是<strong>小寫</strong>（HTTP/2 的 header 名稱一律小寫），
+     * 而站台登入注入的名稱是預設的 {@code Authorization}。
+     */
+    private static ClaimedMonitor monitorWithLogin(Map<String, String> headers) {
+        return new ClaimedMonitor(
+                7L, "login monitor", "https://target.example/api", "GET", null, headers,
+                CompareMode.WHOLE_BODY, List.of(new ExtractRule("status", "/status")), null, null,
+                "{{value.status}}", null, Map.of(), true, Set.of(), Map.of(), List.of(), 42L);
+    }
+
+    private void stubFetchSuccess() {
+        when(fetcher.fetch(any())).thenReturn(new FetchResult.Success(200, "application/json", "{}"));
+        when(changeDetector.detectByFingerprint(any(), any(), any(), any(), any()))
+                .thenReturn(new ChangeResult.Unchanged(new byte[]{1}, Map.of("status", "OK"), List.of()));
+    }
+
+    @Test
+    @DisplayName("自訂 header 有大小寫不同的同名項目：換成新 token，不會兩個都送出去")
+    void loginToken_replacesCaseInsensitiveDuplicate() {
+        // 少了大小寫不敏感的移除，Map 會同時留下 "authorization" 與 "Authorization"，
+        // 到了 HttpRequest 併成同名的兩個值、過期的排在前面 —— 伺服器取第一個就是 401。
+        claims(monitorWithLogin(Map.of(
+                "authorization", "Bearer EXPIRED-TOKEN",
+                "accept", "application/json")));
+        when(siteLoginService.resolve(42L))
+                .thenReturn(new ResolvedLoginHeader("Authorization", "Bearer FRESH-TOKEN"));
+        stubFetchSuccess();
+
+        runner.runOnce();
+
+        ArgumentCaptor<ApiFetcher.FetchRequest> captor = ArgumentCaptor.forClass(ApiFetcher.FetchRequest.class);
+        verify(fetcher).fetch(captor.capture());
+        Map<String, String> sent = captor.getValue().headers();
+        assertThat(sent.keySet().stream().filter(k -> k.equalsIgnoreCase("authorization")))
+                .as("同名 header 只能有一個").hasSize(1);
+        assertThat(sent).containsEntry("Authorization", "Bearer FRESH-TOKEN");
+        assertThat(sent).containsEntry("accept", "application/json");
+        assertThat(sent.values()).doesNotContain("Bearer EXPIRED-TOKEN");
+    }
+
+    @Test
+    @DisplayName("自訂 header 沒有同名項目：照常注入，其餘 header 不動")
+    void loginToken_addedWhenNoDuplicate() {
+        claims(monitorWithLogin(Map.of("accept", "application/json")));
+        when(siteLoginService.resolve(42L))
+                .thenReturn(new ResolvedLoginHeader("Authorization", "Bearer FRESH-TOKEN"));
+        stubFetchSuccess();
+
+        runner.runOnce();
+
+        ArgumentCaptor<ApiFetcher.FetchRequest> captor = ArgumentCaptor.forClass(ApiFetcher.FetchRequest.class);
+        verify(fetcher).fetch(captor.capture());
+        assertThat(captor.getValue().headers())
+                .containsEntry("Authorization", "Bearer FRESH-TOKEN")
+                .containsEntry("accept", "application/json");
+    }
+
+    @Test
+    @DisplayName("登入失敗：分類 LOGIN_ERROR，完全不發出請求（沒 token 的請求必然 401）")
+    void loginFailure_recordsLoginErrorWithoutFetching() {
+        claims(monitorWithLogin(Map.of()));
+        when(siteLoginService.resolve(42L)).thenThrow(new CognitoAuthException(
+                CognitoAuthException.Reason.INVALID_CREDENTIALS, "NotAuthorizedException"));
+
+        runner.runOnce();
+
+        ArgumentCaptor<RunAttempt.Failure> captor = ArgumentCaptor.forClass(RunAttempt.Failure.class);
+        verify(store).recordFailure(any(), captor.capture());
+        assertThat(captor.getValue().classification()).isEqualTo("LOGIN_ERROR");
+        verify(fetcher, never()).fetch(any());
     }
 
     private static List<ChangeResult.NewItem> newItemList(int count) {
