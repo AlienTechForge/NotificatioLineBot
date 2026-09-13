@@ -4,6 +4,8 @@ import com.jason.notifyline.monitor.domain.CompareMode;
 import com.jason.notifyline.monitor.domain.ComputedField;
 import com.jason.notifyline.monitor.domain.ExtractRule;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -82,7 +84,9 @@ public record ClaimedMonitor(
         headers = headers == null ? Map.of() : Map.copyOf(headers);
         extractRules = extractRules == null ? List.of() : List.copyOf(extractRules);
         lastFingerprint = lastFingerprint == null ? null : lastFingerprint.clone();
-        lastState = lastState == null ? Map.of() : Map.copyOf(lastState);
+        lastState = lastState == null
+                ? Map.of()
+                : Collections.unmodifiableMap(new LinkedHashMap<>(lastState));
         seenKeys = seenKeys == null ? Set.of() : Set.copyOf(seenKeys);
         secrets = secrets == null ? Map.of() : Map.copyOf(secrets);
         computedFields = computedFields == null ? List.of() : List.copyOf(computedFields);
