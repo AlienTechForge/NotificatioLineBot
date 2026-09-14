@@ -54,7 +54,10 @@ public class ChangeDetector {
      * {@code EXTRACTED} hash canonical 化後的取出值。<strong>只有在
      * {@code extractRules} 非空時才會解析 body</strong>——{@code WHOLE_BODY}
      * 監控多半不會填 extract_rules，這時完全不必承擔「body 剛好不是合法 JSON
-     * 就整輪失敗」的風險。
+     * 就整輪失敗」的風險。{@code EXTRACTED} 的任一規則若取不到值或取到 JSON
+     * {@code null}，代表本輪回應不完整，直接視為解析失敗；呼叫端因此不會覆寫上一個
+     * 有效指紋與狀態，也不會發出內容變成 {@code —} 的錯誤通知。若舊版本已留下含
+     * {@code null} 的基準，第一個完整回應會安靜地重建基準，不補發一次恢復變更。
      *
      * @param mode                {@code WHOLE_BODY} 或 {@code EXTRACTED}
      *                            （{@code NEW_ITEMS} 一律呼叫 {@link #detectNewItems}）
@@ -82,11 +85,24 @@ public class ChangeDetector {
         Map<String, String> currentValues = rules.isEmpty()
                 ? Map.of()
                 : jsonExtractor.extractAll(jsonExtractor.parse(body), rules);
+        if (mode == CompareMode.EXTRACTED) {
+            currentValues.forEach((name, value) -> {
+                if (value == null) {
+                    throw new ApiException(ErrorCode.VALIDATION_ERROR,
+                            "Extracted value is missing or null: " + name);
+                }
+            });
+        }
         byte[] fingerprint = mode == CompareMode.WHOLE_BODY
                 ? Ids.sha256(body)
                 : fingerprintOfValues(currentValues);
 
-        if (previousFingerprint == null || Arrays.equals(previousFingerprint, fingerprint)) {
+        boolean previousBaselineInvalid = mode == CompareMode.EXTRACTED
+                && previousFingerprint != null
+                && (previousValues == null
+                    || currentValues.keySet().stream().anyMatch(name -> previousValues.get(name) == null));
+        if (previousFingerprint == null || previousBaselineInvalid
+                || Arrays.equals(previousFingerprint, fingerprint)) {
             return new ChangeResult.Unchanged(fingerprint, currentValues, List.of());
         }
         Map<String, String> previous = previousValues == null ? Map.of() : previousValues;
@@ -179,8 +195,8 @@ public class ChangeDetector {
      * {@link Map} 序列化——{@code extract_rules} 在後台被使用者重新排序後，
      * 如果 canonical 化沒有自己排序，同一組值會因為序列化順序不同而算出不同的
      * SHA-256，變成「使用者只是調整了規則順序」卻觸發一次假的變更通知。
-     * 序列化本身走 JSON（而不是手刻 {@code name=value} 字串拼接）是為了讓
-     * {@code null} 值與空字串值有明確、無歧義的區別。
+     * 序列化本身走 JSON（而不是手刻 {@code name=value} 字串拼接），避免欄位名稱與
+     * 值的分隔字元造成歧義。{@code null} 已在進入此方法前被拒絕；空字串仍是有效值。
      */
     private byte[] fingerprintOfValues(Map<String, String> values) {
         Map<String, String> sorted = new TreeMap<>(values);
