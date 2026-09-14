@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.ObjectMapper;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -175,16 +176,45 @@ class ChangeDetectorTest {
         }
 
         @Test
-        @DisplayName("null 取出值與空字串取出值的指紋不同 —— canonical 化沒有把兩者混為一談")
-        void nullValueAndEmptyStringProduceDifferentFingerprints() {
+        @DisplayName("取出值為 JSON null 或路徑不存在時拒絕本輪")
+        void missingOrNullValueRejectsRun() {
             List<ExtractRule> rule = List.of(new ExtractRule("x", "/x"));
 
-            ChangeResult withNull = detector.detectByFingerprint(
-                    CompareMode.EXTRACTED, "{\"x\":null}", rule, null, null);
-            ChangeResult withEmpty = detector.detectByFingerprint(
+            assertThatThrownBy(() -> detector.detectByFingerprint(
+                    CompareMode.EXTRACTED, "{\"x\":null}", rule, null, null))
+                    .isInstanceOf(ApiException.class)
+                    .hasMessageContaining("x");
+            assertThatThrownBy(() -> detector.detectByFingerprint(
+                    CompareMode.EXTRACTED, "{}", rule, null, null))
+                    .isInstanceOf(ApiException.class)
+                    .hasMessageContaining("x");
+        }
+
+        @Test
+        @DisplayName("空字串仍是有效的取出值")
+        void emptyStringRemainsValid() {
+            List<ExtractRule> rule = List.of(new ExtractRule("x", "/x"));
+
+            ChangeResult result = detector.detectByFingerprint(
                     CompareMode.EXTRACTED, "{\"x\":\"\"}", rule, null, null);
 
-            assertThat(withNull.fingerprint()).isNotEqualTo(withEmpty.fingerprint());
+            assertThat(result).isInstanceOf(ChangeResult.Unchanged.class);
+            assertThat(result.currentValues()).containsEntry("x", "");
+        }
+
+        @Test
+        @DisplayName("既有基準含 null 時以第一個有效值重建基準，不發變更")
+        void existingNullBaselineIsReplacedWithoutChangeNotification() {
+            List<ExtractRule> rule = List.of(new ExtractRule("status", "/status"));
+            Map<String, String> previousValues = new HashMap<>();
+            previousValues.put("status", null);
+
+            ChangeResult result = detector.detectByFingerprint(
+                    CompareMode.EXTRACTED, "{\"status\":\"ok\"}", rule,
+                    Ids.sha256("previous null baseline"), previousValues);
+
+            assertThat(result).isInstanceOf(ChangeResult.Unchanged.class);
+            assertThat(result.currentValues()).containsEntry("status", "ok");
         }
 
         @Test
