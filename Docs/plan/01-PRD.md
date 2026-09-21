@@ -151,7 +151,7 @@
 以下是驗收目標，不代表本次已執行正式環境的負載或送達測試：
 
 1. 一個全新的內部服務要接入，**只需要拿到一組金鑰 + 複製一段簽章程式碼**，不需要任何人改 Notification Server 的程式
-2. LINE Channel Token 由 GitHub Secrets 提供給 Notification Server 的 `.env`，不散布到呼叫端或版本庫
+2. LINE Channel Token 只放在部署主機 `.env`，不散布到呼叫端、GitHub 或版本庫
 3. 對 1200 名使用者發送 `ALL`，API 回應時間 < 500ms（因為非同步），且送達統計正確
 4. 任意一次發送都能用 `notificationId` 查到完整投遞結果
 5. 停用一組 Client 後，該來源立即失效且不影響其他來源
@@ -163,7 +163,7 @@
 | LINE Official Account | 已建立，且已取得 Channel Access Token 與 Channel Secret |
 | 公開 HTTPS 端點 | 由使用者自行配置反向代理，**不在本專案範圍**。Server 只需正確處理 `X-Forwarded-*` |
 | LINE 訊息額度 | 額度依地區與方案而定。後台可查額度，但發送前尚無月配額守門；派送時處理 LINE 的 429 |
-| Server 環境 | 具備 Docker 與可供 repo 使用的 self-hosted runner，不需 SSH deploy |
+| Server 環境 | 具備 Docker；本專案只由私人 Operations repo 呼叫 self-hosted runner，不需 SSH deploy |
 
 ---
 

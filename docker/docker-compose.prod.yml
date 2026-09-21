@@ -5,7 +5,7 @@
 #    - image 從 registry 拉，不是本地 build（server 不需要 JDK/Maven/Node）
 #    - image tag 由 NOTIFYLINE_IMAGE 指定，預設 latest
 #
-#  由 CI 的 deploy job 送到 server 的 /opt/notifyline/docker-compose.yml。
+#  由私人 Operations repo 的 deploy job 複製到 server 的部署目錄。
 #  也可以手動用：
 #      NOTIFYLINE_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 \
 #        docker compose --env-file .env up -d
@@ -37,7 +37,7 @@ services:
   app:
     # 由 deploy job 以環境變數指定確切的 sha tag，讓每次部署可追溯、可回滾。
     # 沒指定時退回 latest（手動操作用）。
-    image: ${NOTIFYLINE_IMAGE:-ghcr.io/alientechforge/notificatiolinebot:latest}
+    image: ${NOTIFYLINE_IMAGE:-ghcr.io/alientechforge/notificationlinebot-operations:latest}
     container_name: notifyline-app
     env_file: .env
     depends_on:

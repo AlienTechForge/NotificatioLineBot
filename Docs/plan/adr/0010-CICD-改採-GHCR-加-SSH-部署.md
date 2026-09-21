@@ -3,7 +3,7 @@
 > 校訂日期：2026-09-21。依 2026-09-21 main 的程式碼核對；歷史方案與未實作項目另行標示。
 
 **狀態**：Accepted ｜ 2026-08-19
-**關係**：**補充**（不是取代）[ADR-0006](0006-CICD-採-self-hosted-runner.md)
+**關係**：**補充**（不是取代）[ADR-0006](0006-CICD-採-self-hosted-runner.md)；公開／私人 repo 分離見 [ADR-0013](0013-公開原始碼與私人維運分離.md)
 
 > ### 修正紀錄
 >
@@ -57,7 +57,7 @@ runner **就在那台 server 上**，所以：
 - **不需要 SSH 金鑰**，不用把私鑰放進 GitHub Secrets
 - **不需要對外開 22 port**
 - 健康檢查直接打 `127.0.0.1`，不繞外網
-- `.env` 由 deploy job 在 runner 上依 GitHub Secrets / Variables 產生，檔案不進版控
+- `.env` 只留在 runner 主機；deploy job 驗證後沿用，檔案不進版控或 Actions context
 
 這是相對「SSH 部署」明確更好的一點：少了一把能登入 server 的長期憑證。
 
@@ -89,7 +89,7 @@ deploy job 傳入確切的 sha tag，於是每次部署都對應一個 commit，
 | 後果 | 緩解 |
 |---|---|
 | repo 與 runner 存取範圍必須相容 | 搬移 repo 或調整 runner group 時同步檢查 Actions 權限 |
-| runner 會在 server 上執行 repo 中的程式碼 | **repo 保持 private**；`permissions` 最小化；不使用 `pull_request_target` |
+| runner 會在 server 上執行 workflow | **Operations repo 保持 private**；公開 source repo 停用 Actions；`permissions` 最小化；不使用 `pull_request_target` |
 | runner 是要維運的常駐服務 | 它掛掉時 workflow 會靜默排隊而非明顯失敗，需要留意 |
 | 部署期間短暫停機 | 通知留在 outbox 佇列，重啟後自動補送，不掉單 |
 | GHCR 上的 image 會累積 | 定期清理 untagged image |

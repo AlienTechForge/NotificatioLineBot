@@ -29,7 +29,7 @@ RUN mvn -B -f server/pom.xml dependency:go-offline
 COPY server/ ./server/
 COPY --from=ui /ui/dist/ ./server/src/main/resources/static/admin/
 
-# 映像建置不跑測試 —— 測試在 CI 的 ci.yml（GitHub-hosted + Testcontainers）跑，
+# 映像建置不跑測試 —— 測試在私人 Operations repo 的 deploy workflow（GitHub-hosted + Testcontainers）跑，
 # 這裡跑會需要 docker-in-docker。見 Docs/plan/09-CICD與維運.md
 RUN mvn -B -f server/pom.xml clean package -DskipTests
 

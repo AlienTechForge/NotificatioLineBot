@@ -45,7 +45,7 @@ LINE Bot SDK 10.1.0 負責 webhook 驗簽、回覆、Profile 與 multicast。
 follow／unfollow 事件維護好友狀態；Profile 背景同步補齊名稱、頭像等資料。
 封鎖會停用綁定的 ACTIVE client，重新加好友不自動恢復憑證。
 
-憑證可由管理後台、Bootstrap CLI 或 Admin workflow 建立。自助申請／重設的一次性連結
+憑證可由管理後台或 Bootstrap CLI 建立；Actions 刻意不提供憑證管理。自助申請／重設的一次性連結
 仍未實作，`enrollment_token` 目前只有資料表；不要把「申請金鑰」指令當成已可用流程。
 
 ## 6. 資料庫與機密
@@ -70,8 +70,9 @@ cookie jar、監控密鑰及 Cognito 密碼／token 使用 AES-256-GCM 加密。
 
 ## 9. 部署與尚未完成項目
 
-GitHub-hosted runner 測試、建置並推送 GHCR；self-hosted runner 在部署主機執行 Compose。
-main push 會觸發部署，不使用 SSH deploy。正式網址由部署者配置，文件一律以 `notify.example.com` 示範。
+公開 repo 不含且停用 GitHub Actions。私人 Operations repo 每 10 分鐘偵測公開 `main`，
+有新 SHA 時由 GitHub-hosted runner 測試、建置並推送私人 GHCR，再由 self-hosted runner 在部署主機執行 Compose。
+不使用 SSH deploy。正式網址由部署者配置，文件一律以 `notify.example.com` 示範。
 
 尚未完成：enrollment、audit_log 寫入、一般通知歷史的保留期排程、自訂指標與告警、
 卡住的通知彙總狀態修復、多實例協調。不要把規劃當成現有可靠性保證。

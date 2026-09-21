@@ -20,8 +20,9 @@
 | [0008](0008-鎖定-Spring-Boot-4.1-並覆寫-Jackson-2-版本.md) | 鎖定 Spring Boot 4.1 並覆寫 Jackson 2 版本 | Accepted |
 | [0009](0009-Admin-認證採-LINE-Login.md) | Admin 認證採 LINE Login | **Superseded by 0011** |
 | [0010](0010-CICD-改採-GHCR-加-SSH-部署.md) | image 走 GHCR，部署仍由 self-hosted runner 執行（含一次判斷失誤的修正紀錄） | Accepted |
-| [0011](0011-管理介面採帳密登入.md) | 管理介面採帳密登入，帳密來源為 GitHub Secrets | Accepted |
+| [0011](0011-管理介面採帳密登入.md) | 管理介面採帳密登入（帳密來源現由 ADR-0013 改為主機 `.env`） | Accepted / amended |
 | [0012](0012-Admin-UI-採原生靜態資源.md) | Admin UI 採原生靜態資源並由 Spring Boot 直接服務 | Accepted |
+| [0013](0013-公開原始碼與私人維運分離.md) | 公開原始碼與私人 Operations／Actions 分離 | Accepted |
 
 ## 格式
 

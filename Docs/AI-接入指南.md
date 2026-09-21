@@ -32,58 +32,23 @@ LINE 的 Channel Token、SDK、使用者名單、發送權限、發送紀錄全�
 憑證一律由服務管理者建立，**呼叫端無法自行申請**。
 服務**沒有**任何自助換取金鑰的公開端點 —— 不要去找 enrollment / 註冊之類的 URL，那不存在。
 
-管理者有三條等價的建立路徑：
+管理者有兩條建立路徑：
 
 | 路徑 | 怎麼用 |
 |---|---|
 | 管理後台 | 登入 `/admin` → 憑證頁 → 新增，建立後畫面顯示一次明文 secret |
-| GitHub Actions | repo 的 **Admin** workflow，見下方步驟 |
 | Bootstrap CLI | `java -jar app.jar --create-client --name=backup-service --service` |
 
-以下以 GitHub Actions 為例（repo `AlienTechForge/NotificatioLineBot`）：
-
-1. Actions → **Admin** → Run workflow
-2. 填入：
-
-   | 欄位 | 值 |
-   |---|---|
-   | 要執行的動作 | `create-service-client` |
-   | LINE User ID | 留空 |
-   | 憑證名稱 | 呼叫端的識別名稱，例如 `ci-runner` |
-   | Client ID | 留空 |
-
-3. 執行完成後展開 **建立 SERVICE 憑證** 步驟的 raw log，裡面有一段框起來的輸出：
-
-   ```
-   ═══════════════════════════════════════════════════════════════
-     Client 已建立
-   ═══════════════════════════════════════════════════════════════
-     名稱        : ci-runner
-     Client ID   : cli_xxxxxxxxxxxxxxxxxxxx
-     Client Secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-     綁定使用者   : （無，SERVICE client）
-     權限        : notify:owner
-   ═══════════════════════════════════════════════════════════════
-   ```
+優先使用管理後台。建立 SERVICE client 時不綁 LINE User ID；建立 OWNER client 時必須選擇或填入
+對應的 LINE 使用者。Actions 不再提供建立、列出或作廢憑證的功能，避免 secret 或使用者識別資料
+進入永久 workflow log。
 
 格式：client id 是 `cli_` + 20 個小寫英數字元；secret 是 48 bytes 隨機值的
 base64url（無 padding），共 64 個字元。**secret 就是 HMAC 金鑰，簽章時直接拿這個字串的
 UTF-8 位元組當 key，不要先做 base64 解碼。**
 
 > **secret 只在建立當下出現這一次。** 資料庫裡是加密儲存的，設計上不提供讀回。
-> 弄丟只能作廢重建（Admin → `revoke-client` → `create-service-client`）。
-
-其他可用的管理動作：
-
-| 動作 | 用途 |
-|---|---|
-| `status` | 服務狀態與資料統計 |
-| `create-owner-client` | 建立擁有完整發送權限的憑證。需填 LINE User ID |
-| `set-owner` | 把某個 LINE user 標記為 owner。需填 LINE User ID |
-| `list-clients` | 列出所有憑證與其 scope、狀態（不含 secret） |
-| `revoke-client` | 作廢一組憑證（不可回復）。需填 Client ID |
-| `reload-admin-login` | 從 GitHub Secrets 重新讀取管理介面帳密 |
-| `logs` | 看最近的應用日誌 |
+> 弄丟只能在管理後台作廢並重建。
 
 ### 憑證的保管
 
@@ -95,7 +60,7 @@ UTF-8 位元組當 key，不要先做 base64 解碼。**
 
 ## 2. 權限模型（scope）
 
-`create-service-client` 建立的憑證**只有 `notify:owner`**。
+SERVICE 憑證預設**只有 `notify:owner`**。
 也就是說它只能發給服務的管理者，不能發給其他 LINE 使用者。
 
 | scope | 允許的 `target.type` | 誰有 |
@@ -107,7 +72,7 @@ UTF-8 位元組當 key，不要先做 base64 解碼。**
 | `notify:raw` | 使用 `lineMessages` 欄位 | 需另外明確授予 |
 
 `notify:user` / `notify:all` / `notify:raw` 三個是 OWNER-only，一般憑證拿不到。
-其中 **`notify:raw` 連 `create-owner-client` 建出來的 OWNER 憑證都不會預設帶**，
+其中 **`notify:raw` 連 OWNER 憑證都不會預設帶**，
 要用進階模式必須請管理者單獨授予。
 
 **如果你不確定自己有什麼權限，先打 `GET /api/v1/whoami`**（見 §6）。

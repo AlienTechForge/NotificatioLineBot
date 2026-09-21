@@ -2,19 +2,19 @@
 
 > 校訂日期：2026-09-21。依 2026-09-21 main 的程式碼核對；歷史方案與未實作項目另行標示。
 
-**狀態**：Accepted ｜ 2026-08-18（2026-08-19 由 [ADR-0010](0010-CICD-改採-GHCR-加-SSH-部署.md) 補充 image 建置方式）
+**狀態**：Accepted ｜ 2026-08-18（由 [ADR-0010](0010-CICD-改採-GHCR-加-SSH-部署.md) 與 [ADR-0013](0013-公開原始碼與私人維運分離.md) 補充）
 
 > 本決策**仍然有效**。2026-08-19 曾一度被錯誤地標記為 Superseded —— 見 ADR-0010 的說明。
 > 實際採用的是「GitHub-hosted 建 image + self-hosted runner 部署」的組合，
 > 部署端仍是 self-hosted runner。
 
-> **2026-09-21 實作核對**：目前只有 `.github/workflows/ci-cd.yml`，工作為 `test`、`image`、`deploy`；部署 job 使用 `[self-hosted, Linux, X64]`。正式 `.env` 由 workflow 以 GitHub Secrets / Variables 產生，因此本文下方「機密從不進 GitHub」與舊 workflow 名稱屬歷史方案，不代表現況。Actions 也仍採版本標籤，尚未全部釘到 40 字元 commit SHA。
+> **2026-09-21 實作核對**：公開 repo 已移除並停用 Actions。workflow 位於私人 Operations repo；部署 job 使用 `[self-hosted, Linux, X64]`，正式 `.env` 只留在主機，所有第三方 action 均釘到 40 字元 commit SHA。詳細分離方式見 ADR-0013。
 
 ## 背景
 
 需求是「配好 GitHub CI/CD，每次 Action 自動推到 server」。
 
-Server 由使用者自行管理（含反向代理與 HTTPS）。Repo 為 **private**。
+Server 由使用者自行管理（含反向代理與 HTTPS）。原始碼 repo 為 public，維運 repo 為 **private**。
 
 GitHub Actions 要把產物送上 server，主要有四種做法：
 
@@ -57,7 +57,7 @@ GitHub Actions 要把產物送上 server，主要有四種做法：
 >
 > 任何人都能發 fork PR，若 workflow 在 self-hosted runner 上執行該 PR 的程式碼，等於讓陌生人在你的 server 上執行任意指令。
 
-本專案是 private repo，此風險不存在。**若未來要改成 public，必須先重新評估整個部署方案。**
+因此本專案的 self-hosted jobs 只放在私人 Operations repo；公開 source repo 不含 workflow 且 Actions 已停用。見 ADR-0013。
 
 ## 已考慮的替代方案
 

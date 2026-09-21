@@ -43,7 +43,7 @@ POST /api/v1/notifications
 | ALL 發送 | multicast 分批 500 人 + 非同步佇列（**沒有 push、沒有 GROUP/ROOM**） | [ADR-0003](adr/0003-ALL-採-multicast-而非-broadcast.md) |
 | 非同步 | DB outbox + `@Async`；claim 用 `FOR UPDATE SKIP LOCKED`，預設每 10 秒補償取件 | [ADR-0007](adr/0007-非同步採-DB-outbox-而非訊息中介.md) |
 | Admin UI | 實際為**手寫原生 HTML/JS/CSS**，直接放在 `server/src/main/resources/static/admin/`，無框架、無 build step | [ADR-0012](adr/0012-Admin-UI-採原生靜態資源.md) 取代 ADR-0005 的框架方案；`admin-ui/` 目前只有 `.gitkeep` |
-| CI/CD | GitHub-hosted 建 image 推 GHCR，**self-hosted runner 部署** | [ADR-0006](adr/0006-CICD-採-self-hosted-runner.md) + [ADR-0010](adr/0010-CICD-改採-GHCR-加-SSH-部署.md) |
+| CI/CD | 公開 repo 停用 Actions；私人 Operations repo 測試、建私人 GHCR image，**self-hosted runner 部署** | [ADR-0006](adr/0006-CICD-採-self-hosted-runner.md) + [ADR-0010](adr/0010-CICD-改採-GHCR-加-SSH-部署.md) + [ADR-0013](adr/0013-公開原始碼與私人維運分離.md) |
 | 對外 Endpoint | 使用者自行配置反向代理與 HTTPS | 不在本專案範圍 |
 
 ---

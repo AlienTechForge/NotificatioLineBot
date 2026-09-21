@@ -151,5 +151,6 @@ Testcontainers · Docker
 - **`APP_SECRET_ENC_KEY` 遺失會使使用該版本的憑證與監控登入資料無法解密**。
   必須額外備份，且**不可與資料庫備份放在同一個地方** ——
   完整說明見 [`deploy/金鑰管理.md`](deploy/金鑰管理.md)
-- Client secret 的 API 不提供讀回；CLI／Admin workflow 建立時會留下明文輸出，Actions raw log 仍可能保留該值。
-- 文件與 nginx 範例只使用示例網域；歷史 commit／Actions logs 的個資及機密風險見隱私檢查報告。
+- Client secret 的 API 不提供讀回；建立後應立即存入密碼管理器，禁止寫入 Actions log。
+- 公開 repo 已停用 Actions；測試、image 與部署由私人 Operations repo 執行，self-hosted runner 不接觸公開 PR。
+- 文件與 nginx 範例只使用示例網域；歷史 rewrite、GitHub 快取與既有 clone 的處置見隱私檢查報告。
