@@ -1,5 +1,7 @@
 # 01 — 產品需求（PRD）
 
+> 校訂日期：2026-09-21。依 2026-09-21 main 的程式碼核對；歷史方案與未實作項目另行標示。
+
 ← [文件索引](README.md)
 
 ## 1. 問題陳述
@@ -32,7 +34,7 @@
 | 角色 | 說明 | 持有的憑證 |
 |---|---|---|
 | **SERVICE**（呼叫服務） | 內部後端服務，如 Server Monitor、Backup Service | SERVICE client 金鑰，無綁定 LINE user |
-| **USER**（一般 LINE 使用者） | 加入 Bot 好友的一般使用者 | 自助申請取得的 USER client 金鑰，綁定自己 |
+| **USER**（一般 LINE 使用者） | 加入 Bot 好友的一般使用者 | 由管理者建立、綁定自己的 USER client；自助申請未實作 |
 | **OWNER**（管理者） | 系統擁有者，可能不只一人 | OWNER client 金鑰，擁有全部權限 |
 
 ### 3.2 場景
@@ -50,17 +52,17 @@
 - 所有 `is_owner = true` 且 `status = ACTIVE` 的使用者收到訊息
 - 該 SERVICE client 若嘗試送 `target: ALL`，回 `403 SCOPE_DENIED`
 
-#### S2 — 使用者自我提醒
+#### S2 — 使用者自我提醒（SELF 已實作，自助領取仍為規劃）
 
 > 使用者小明在自己的個人腳本裡串接，跑完長時間任務時通知自己。
 
-- 呼叫方：USER client（小明自助申請的）
+- 呼叫方：USER client（目前由管理者建立）
 - target：`SELF`
 - 期待：只有小明收到
 
 **驗收條件**
-- 小明在 LINE 傳「申請金鑰」，收到一次性連結
-- 開啟連結取得 clientId 與 secret，該連結再次開啟回 `410`
+- 現況：管理者在後台或 CLI 建立並安全交付 clientId 與 secret
+- 待辦：LINE「申請金鑰」的一次性連結與重開回 410 尚未實作
 - 用該金鑰送 `target: SELF`，只有小明收到
 - 用該金鑰送 `target: USER` 指定他人 user id，回 `403`
 - 用該金鑰送 `target: USER` 指定自己的 user id，**同樣回 `403`**（不開後門，要發給自己就用 `SELF`）
@@ -111,25 +113,27 @@
 - [x] Client 與 scope 權限模型
 - [x] LINE Webhook：follow / unfollow / 文字指令
 - [x] LINE User 管理與 Profile 同步
-- [x] 自助申請金鑰（一次性連結）
+- [ ] 自助申請金鑰（一次性連結）；目前只支援管理者建立
 - [x] 四種 target：SELF / OWNER / USER / ALL
 - [x] 非同步分批發送、重試、冪等
 - [x] 通知紀錄與查詢
 - [x] Docker Compose 部署 + CI/CD
 
-### Phase 2 — Admin Panel
+### Phase 2 — Admin Panel（已部分落地）
 
-- Client CRUD 與 scope 調整
-- LINE User 列表、owner 標記
-- 通知紀錄查詢與篩選
-- 手動發送介面
+- 已有 client 建立、撤銷與預設通知對象；沒有完整 CRUD 或 scope 編輯 API
+- 已有 ACTIVE 好友列表、owner 標記、手動通知
+- 已有最近 100 筆通知、內容預覽／完整內容、批次狀態與指定時間通知取消
+- 已有 API 監控、cookie jar、Cognito SRP 登入管理
+- 尚無稽核記錄寫入、進階搜尋／分頁或多管理者個別身分
 
-技術方向見 [ADR-0005](adr/0005-Admin-UI-單一-repo-打包進-jar.md)，結構預留見 [02-架構設計](02-架構設計.md)。
+後台使用原生靜態資源，現況見 [ADR-0012](adr/0012-Admin-UI-採原生靜態資源.md)。
 
-### Phase 3 — 定時通知
+### Phase 3 — 指定時間通知與監控（已部分落地）
 
-- 以 Quartz + JDBC JobStore 實作動態排程
-- 排程實體只存 target + message + cron，執行時**走與 API 完全相同的派送路徑**，不另開第二套發送邏輯
+- `scheduledAt` 已提供一次性的未來通知，與立即發送共用 DB outbox
+- 監控按間隔抓取 API 並對變更發通知；包含匯入、計算欄位、站台登入
+- cron 週期通知與 Quartz 仍未實作，不是目前的排程引擎
 
 ### 非目標（明確不做）
 
@@ -144,10 +148,10 @@
 
 ## 5. 成功指標
 
-Phase 1 完成的判準（可客觀驗證，非感覺）：
+以下是驗收目標，不代表本次已執行正式環境的負載或送達測試：
 
 1. 一個全新的內部服務要接入，**只需要拿到一組金鑰 + 複製一段簽章程式碼**，不需要任何人改 Notification Server 的程式
-2. LINE Channel Token 只存在於 Notification Server 的 `.env`，全文檢索其他專案找不到第二份
+2. LINE Channel Token 由 GitHub Secrets 提供給 Notification Server 的 `.env`，不散布到呼叫端或版本庫
 3. 對 1200 名使用者發送 `ALL`，API 回應時間 < 500ms（因為非同步），且送達統計正確
 4. 任意一次發送都能用 `notificationId` 查到完整投遞結果
 5. 停用一組 Client 後，該來源立即失效且不影響其他來源
@@ -158,9 +162,14 @@ Phase 1 完成的判準（可客觀驗證，非感覺）：
 |---|---|
 | LINE Official Account | 已建立，且已取得 Channel Access Token 與 Channel Secret |
 | 公開 HTTPS 端點 | 由使用者自行配置反向代理，**不在本專案範圍**。Server 只需正確處理 `X-Forwarded-*` |
-| LINE 訊息額度 | 免費方案有月額度上限。`ALL` 發送前會檢查，但額度規劃是營運決策 |
-| Server 環境 | 具備 Docker 與可供 CI 部署的 SSH 存取 |
+| LINE 訊息額度 | 額度依地區與方案而定。後台可查額度，但發送前尚無月配額守門；派送時處理 LINE 的 429 |
+| Server 環境 | 具備 Docker 與可供 repo 使用的 self-hosted runner，不需 SSH deploy |
 
 ---
 
 **下一份** → [02-架構設計](02-架構設計.md)
+
+## 實作邊界
+
+202 只承諾受理；SUCCEEDED 只表示 LINE 接受批次，無法證明讀取或實際到達手機。
+稽核與一般通知保留期尚未完成，見 [10-任務拆解](10-任務拆解.md)。

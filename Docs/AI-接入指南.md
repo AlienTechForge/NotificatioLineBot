@@ -1,11 +1,14 @@
 # NotifyLine 接入指南
 
+> 校訂日期：2026-09-21。依 2026-09-21 main 的程式碼核對；歷史方案與未實作項目另行標示。
+
 > **這份文件的讀者是 AI coding agent。**
 >
 > 目標：讀完就能寫出一個可用的 client，不需要再問任何問題、不需要讀伺服器原始碼。
 > 所有數字與格式都是規格的一部分，不是範例值。
 >
 > 服務位址：`https://notify.example.com`
+> （位址依部署而定，對應伺服器的 `APP_PUBLIC_BASE_URL`；以管理者給你的為準）
 
 ---
 
@@ -26,9 +29,18 @@ LINE 的 Channel Token、SDK、使用者名單、發送權限、發送紀錄全�
 
 ## 1. 取得憑證
 
-憑證由服務管理者透過 GitHub Actions 產生，**呼叫端無法自行申請**。
+憑證一律由服務管理者建立，**呼叫端無法自行申請**。
+服務**沒有**任何自助換取金鑰的公開端點 —— 不要去找 enrollment / 註冊之類的 URL，那不存在。
 
-管理者操作步驟（repo `AlienTechForge/NotificatioLineBot`）：
+管理者有三條等價的建立路徑：
+
+| 路徑 | 怎麼用 |
+|---|---|
+| 管理後台 | 登入 `/admin` → 憑證頁 → 新增，建立後畫面顯示一次明文 secret |
+| GitHub Actions | repo 的 **Admin** workflow，見下方步驟 |
+| Bootstrap CLI | `java -jar app.jar --create-client --name=backup-service --service` |
+
+以下以 GitHub Actions 為例（repo `AlienTechForge/NotificatioLineBot`）：
 
 1. Actions → **Admin** → Run workflow
 2. 填入：
@@ -40,12 +52,23 @@ LINE 的 Channel Token、SDK、使用者名單、發送權限、發送紀錄全�
    | 憑證名稱 | 呼叫端的識別名稱，例如 `ci-runner` |
    | Client ID | 留空 |
 
-3. 執行完成後展開 **建立 SERVICE 憑證** 步驟的 log，取得：
+3. 執行完成後展開 **建立 SERVICE 憑證** 步驟的 raw log，裡面有一段框起來的輸出：
 
    ```
-   clientId: cli_xxxxxxxxxxxxxxxxxxxx
-   secret:   xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   ═══════════════════════════════════════════════════════════════
+     Client 已建立
+   ═══════════════════════════════════════════════════════════════
+     名稱        : ci-runner
+     Client ID   : cli_xxxxxxxxxxxxxxxxxxxx
+     Client Secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+     綁定使用者   : （無，SERVICE client）
+     權限        : notify:owner
+   ═══════════════════════════════════════════════════════════════
    ```
+
+格式：client id 是 `cli_` + 20 個小寫英數字元；secret 是 48 bytes 隨機值的
+base64url（無 padding），共 64 個字元。**secret 就是 HMAC 金鑰，簽章時直接拿這個字串的
+UTF-8 位元組當 key，不要先做 base64 解碼。**
 
 > **secret 只在建立當下出現這一次。** 資料庫裡是加密儲存的，設計上不提供讀回。
 > 弄丟只能作廢重建（Admin → `revoke-client` → `create-service-client`）。
@@ -54,10 +77,13 @@ LINE 的 Channel Token、SDK、使用者名單、發送權限、發送紀錄全�
 
 | 動作 | 用途 |
 |---|---|
+| `status` | 服務狀態與資料統計 |
+| `create-owner-client` | 建立擁有完整發送權限的憑證。需填 LINE User ID |
+| `set-owner` | 把某個 LINE user 標記為 owner。需填 LINE User ID |
 | `list-clients` | 列出所有憑證與其 scope、狀態（不含 secret） |
 | `revoke-client` | 作廢一組憑證（不可回復）。需填 Client ID |
-| `create-owner-client` | 建立擁有完整發送權限的憑證。需填 LINE User ID |
-| `status` | 服務狀態與資料統計 |
+| `reload-admin-login` | 從 GitHub Secrets 重新讀取管理介面帳密 |
+| `logs` | 看最近的應用日誌 |
 
 ### 憑證的保管
 
@@ -80,6 +106,10 @@ LINE 的 Channel Token、SDK、使用者名單、發送權限、發送紀錄全�
 | `notify:all` | `ALL` | 僅 OWNER 憑證 |
 | `notify:raw` | 使用 `lineMessages` 欄位 | 需另外明確授予 |
 
+`notify:user` / `notify:all` / `notify:raw` 三個是 OWNER-only，一般憑證拿不到。
+其中 **`notify:raw` 連 `create-owner-client` 建出來的 OWNER 憑證都不會預設帶**，
+要用進階模式必須請管理者單獨授予。
+
 **如果你不確定自己有什麼權限，先打 `GET /api/v1/whoami`**（見 §6）。
 
 scope 不足一律回 `403 SCOPE_DENIED`，不會退化成「送給比較少人」。
@@ -94,8 +124,12 @@ scope 不足一律回 `403 SCOPE_DENIED`，不會退化成「送給比較少人�
 |---|---|
 | `X-Client-Id` | `cli_` 開頭的 client id |
 | `X-Timestamp` | 目前時間，Unix epoch **秒**，十進位字串 |
-| `X-Nonce` | 每個請求都不同的隨機字串，建議 UUID v4 |
+| `X-Nonce` | 每個請求都不同的隨機字串，**最長 64 字元**（資料庫欄位是 `VARCHAR(64)`），建議 UUID v4 |
 | `X-Signature` | 見下方 |
+
+header 名稱依 HTTP 慣例不分大小寫，但**值**是原封不動拿去算的，一個字元都不能差。
+伺服器對 `X-Timestamp` 與 `X-Nonce` 會先 `trim()` 再放進 canonical string，
+所以**值前後不要留空白**，否則你算的與伺服器算的會不一致。
 
 ### 3.1 canonical string
 
@@ -148,12 +182,29 @@ X-Signature = base64_standard( HMAC_SHA256( key = secret_utf8, message = canonic
 
 **正確做法**：先產生 `bytes`，對它算雜湊，然後把**同一份 bytes** 當作 request body 送出。
 
+```
+✗  hash(serialize(obj))  … 然後  send(serialize(obj))     ← 兩次序列化，遲早分岔
+✓  bytes = serialize(obj);  hash(bytes);  send(bytes)      ← 只有一份位元組
+```
+
+伺服器端是把**收到的原始位元組**整包快取起來直接算 SHA-256，中間不做任何反序列化、
+不做正規化、不重排欄位。所以只要你送出的位元組跟你雜湊的位元組差一個 byte，就一定失敗。
+
+同一個陷阱的變形，全部會壞：
+
+- HTTP client 幫你把 `body` 物件再序列化一次（傳物件而不是 bytes 給它）
+- 中間層加了 gzip 之後才算雜湊，或算完雜湊才 gzip
+- 用 `--data-raw` 傳含非 ASCII 的字串，殼層／argv 改寫了編碼（見 §8.4）
+- 先用 pretty-print 印出來除錯，然後不小心把那份縮排過的字串送出去
+
 這是接入端最常見的錯誤，沒有之一。
 
 ### 3.4 測試向量
 
-實作完先用這組驗證，**對不上就不要往下做**。
-§8 的 Python / Node.js / Bash / PowerShell 實作都已對這組向量逐位元組驗證過。
+實作完先用這組驗證，**對不上就不要往下做**。這組向量完全離線，不需要有效憑證、
+不需要連得到伺服器。
+§8 的 Python / Node.js / Bash / PowerShell / Java 實作都應先對這組向量逐位元組驗證；
+Go 版走的是完全相同的步驟。
 
 | 項目 | 值 |
 |---|---|
@@ -167,7 +218,9 @@ X-Signature = base64_standard( HMAC_SHA256( key = secret_utf8, message = canonic
 | body sha256 hex | `314701043308c543409c76c660248a051f2ef2a5b7b84d1efbbff8b19e712e14` |
 | **期望的 X-Signature** | `A8InT6lAaimJ+IRPaMuBVJxCgNY+V3Gckgw0px/P9MA=` |
 
-body 長度是 55 而不是 49，就是在確認你的字串是以 UTF-8 而非其他編碼取位元組的。
+這段 JSON 有 **51 個字元**，UTF-8 編碼後是 **55 bytes**（中文各 3 bytes）。
+先對長度：拿到 51 代表你雜湊的是字元不是位元組；拿到 53 代表用了 Big5／GBK；
+拿到 55 才往下比雜湊值。
 
 ### 3.5 伺服器端的驗證順序
 
@@ -176,13 +229,16 @@ body 長度是 55 而不是 49，就是在確認你的字串是以 UTF-8 而非�
 1. 四個 header 都存在 → 否則 `AUTH_MISSING_HEADER`
 2. `X-Timestamp` 與伺服器時間差 **≤ 300 秒** → 否則 `AUTH_TIMESTAMP_SKEW`
 3. client 存在且狀態為 ACTIVE → 否則 `AUTH_INVALID_SIGNATURE` / `AUTH_CLIENT_DISABLED`
-4. 簽章比對（常數時間）→ 否則 `AUTH_INVALID_SIGNATURE`
+4. 簽章比對（常數時間，`MessageDigest.isEqual`）→ 否則 `AUTH_INVALID_SIGNATURE`
 5. nonce 未使用過 → 否則 `AUTH_NONCE_REPLAY`
 
 補充：
 
-- **時鐘同步很重要。** 偏差超過 300 秒就一律失敗。容器裡跑的服務尤其要注意
-- **nonce 在 600 秒內不可重複。** 每個請求產生一個新的 UUID 即可
+- **時鐘同步很重要。** 偏差是取絕對值後與 300 秒比較（快慢都算），`= 300` 過、`> 300` 拒。
+  容器裡跑的服務尤其要注意
+- **nonce 在 600 秒內不可重複。** 每個請求產生一個新的 UUID 即可。
+  nonce 是**驗簽通過之後**才寫入的，所以簽章錯誤的請求不會消耗掉那個 nonce ——
+  修好簽章後可以用同一個 nonce 重送
 - **`client id 不存在` 與 `簽章錯誤` 回同一個錯誤碼**，這是刻意的，避免被列舉出哪些
   client id 存在。所以 `AUTH_INVALID_SIGNATURE` 有兩種可能，兩個都要檢查
 
@@ -199,8 +255,13 @@ Content-Type: application/json
 
 | Header | 說明 |
 |---|---|
-| `Idempotency-Key` | 最長 128 字元。見 §4.5 |
-| `X-Request-Id` | 你自己的追蹤碼，會出現在錯誤回應與伺服器日誌中 |
+| `Idempotency-Key` | 最長 128 字元，超過回 `400 VALIDATION_ERROR`。見 §4.6 |
+| `X-Request-Id` | 你自己的追蹤碼。**最長 64 字元**，`[A-Za-z0-9_.:-]` 以外的字元會被換成 `_`；沒帶時伺服器自己產一個 UUID |
+
+`X-Request-Id` 一律會回填在**回應的同名 header** 與錯誤信封的 `error.requestId`。
+回報問題時附上它，管理者才查得到對應的伺服器日誌。
+
+以上兩個 header **不參與簽章** —— canonical string 只有 §3.1 那五段。
 
 ### 4.2 Request body
 
@@ -237,6 +298,11 @@ Content-Type: application/json
 
 **`message` 與 `lineMessages` 必須恰好給一個。** 兩個都給或都不給都回 400 ——
 不會替你猜哪個優先。
+
+簡易模式最後產生的是**一則** LINE `text` 訊息：有 `title` 時是
+`title + "\n" + text`，沒有時就是 `text` 本身。5000 字上限算的是合併後的長度。
+
+`options` 整個省略時等同 `{"notificationDisabled": false, "persistPayload": true}`。
 
 ### 4.2.1 省略 target：使用預設通知對象
 
@@ -281,6 +347,11 @@ Content-Type: application/json
 
 拿到 202 就代表工作已寫入資料庫，即使伺服器下一秒被 kill 也不會遺失。
 
+- `recipientCount` 是**去重之後**的人數。`userIds` 裡填了重複的 id 只算一次
+- `batchCount` 是 `ceil(recipientCount / 500)` —— LINE 的 multicast 一次最多 500 人
+- `status` 在正常受理時一定是 `QUEUED`；但**冪等重播**時回的是那筆通知的
+  **當下狀態**，所以可能直接看到 `SUCCEEDED`。不要把「202 + 非 QUEUED」當成異常
+
 ### 4.4 進階模式：lineMessages
 
 直接傳 LINE 原生的 message object 陣列（Flex Message、貼圖、圖片等）。
@@ -309,23 +380,31 @@ Content-Type: application/json
 - 所以純文字訊息裡的連結一樣要過白名單
 - 掃描是遞迴的，Flex Message 深層巢狀裡的連結也會被檢查
 
+**白名單預設是空的，而空白名單代表「一個外部連結都不准」。**
+換句話說，除非管理者在 `app.allowed-uri-hosts`（環境變數 `APP_ALLOWED_URI_HOSTS`）
+明確列了網域，否則任何 `http(s)://` 都會被擋。要放連結就先跟管理者確認。
+
 其他規則：
 
 - 子網域自動涵蓋：白名單有 `example.com` 時，`docs.example.com` 通過
 - `evil-example.com`、`example.com.attacker.net` **不會**通過
 - `tel:`、`mailto:`、`line://` 放行（LINE 原生 action）
-- `javascript:`、`data:`、`file:` 等一律拒絕
-- 一般含冒號的文字（`Warning: disk full`、`ratio 16:9`）不受影響
+- `javascript:`、`data:`、`vbscript:`、`file:`、`blob:`、`jar:` 拒絕。判定條件是
+  **整個欄位值就是這樣一串**（例如 Flex 的 `"uri": "javascript:..."`），
+  所以一般含冒號的文字（`Warning: disk full`、`ratio 16:9`）不受影響
+- 連結後面黏著的中英文句尾標點（`.,;:!?)]}>'"。，、；：！？）】》」』`）會先被修掉再判斷
+- 解析不出 host 的連結是**拒絕**，不是略過
+- 巢狀掃描最多 32 層，超過回 `400 VALIDATION_ERROR`
 
-被擋時錯誤訊息會指出是哪個連結。要新增網域請找服務管理者。
+被擋時錯誤訊息會指出是哪個連結（截斷至 120 字元）。要新增網域請找服務管理者。
 
 ### 4.6 冪等
 
-帶 `Idempotency-Key` header：
+帶 `Idempotency-Key` header（選填，最長 128 字元）：
 
 | 情況 | 結果 |
 |---|---|
-| 同一把 key，**body 位元組完全相同** | 回傳原本那筆的結果，不會重複發送 |
+| 同一把 key，**body 位元組完全相同** | 回傳原本那筆的結果（同一個 `notificationId`），不會重複發送 |
 | 同一把 key，body 不同 | `409 IDEMPOTENCY_CONFLICT` |
 | 不同 client 用同一把 key | 互不影響（範圍是 client + key） |
 | 沒帶 key | 每次都是新的一筆 |
@@ -333,6 +412,14 @@ Content-Type: application/json
 **逾時或連線中斷後的重試一定要帶同一把 key**，否則使用者會收到兩則相同通知。
 
 比對依據是 request body 的原始位元組雜湊，所以重試時要送出**完全相同的 bytes**。
+`X-Timestamp`、`X-Nonce`、`X-Signature` 要重算（時間過了、nonce 不能重用），
+但 **body 一個 byte 都不能動** —— 這跟 §3.3 是同一件事。
+
+重播走的是最前面的快路徑：不會再解析一次訊息、**不會再扣一次每日配額**。
+所以「因為逾時而重送」在配額上仍然只算一次發送。
+
+兩個併發請求帶同一把 key 同時打進來時，只有一個會真的建立通知，另一個會拿到
+與前者相同的結果（不是 409，前提是 body 相同）。
 
 ---
 
@@ -396,17 +483,25 @@ GET https://notify.example.com/api/v1/notifications/{notificationId}
 | `LINE_BAD_REQUEST` | 訊息內容被 LINE 拒絕，不會重試 |
 | `LINE_SERVER_ERROR` | LINE 端故障，已排入重試 |
 | `LINE_IO_ERROR` | 網路層問題，已排入重試 |
-| `PAYLOAD_GONE` | 內容已被保留期清理，無法重送 |
+| `PAYLOAD_GONE` | 取件時已經沒有可送的內容（`persistPayload: false` 送完即清空，或通知已被刪除），無法重送 |
 
 **只能查自己送出的通知。** 查別人的與查不存在的都回 `404`（刻意相同，避免試探）。
 
 ### 輪詢建議
 
-發送通常在 1 秒內完成。若要確認結果：
+發送通常在 1 秒內完成 —— 受理當下就會直接踢一次派送，不必等排程。
+若要確認結果：
 
 1. 收到 202 後等 2–3 秒再查第一次
-2. 未到終局狀態則以指數退避重試，上限約 60 秒
-3. 重試最多 5 次，每次退避 1/2/4/8/16 秒，所以最壞情況約 31 秒後才會是終局
+2. 未到終局狀態則以指數退避重查；呼叫端自行設定總等待上限
+
+伺服器端的重試節奏（決定你最久要等多久）：
+
+- 一個批次**最多嘗試 5 次**
+- 暫時性失敗之間的退避是 **1、2、4、8 秒**，各加 ±20% 抖動
+- 所以一個一直失敗的批次大約 **15～20 秒**後就會落到終局；加上排程取件的間隔
+  （預設 10 秒一輪）、限速、斷路器與 LINE 呼叫耗時；60 秒不保證一定進入終局狀態
+- 斷路器把呼叫擋下來時**不算一次嘗試**，這種情況會拉長，但不會提早耗盡重試次數
 
 **不要用緊迫的迴圈輪詢** —— 查詢也計入速率限制。
 
@@ -417,6 +512,13 @@ GET https://notify.example.com/api/v1/notifications/{notificationId}
 ```
 GET https://notify.example.com/api/v1/whoami
 ```
+
+**接入時第一支要打的就是這個，也是出問題時第一支要回頭打的。**
+它不需要 body、不需要任何 scope、不會發出任何通知，所以是最乾淨的自我診斷：
+只要它回 200，就代表「憑證有效 + GET 空 body 的簽章路徑可用」。POST 仍需另外核對實際 body bytes、path、timestamp、nonce 與 scope。
+
+簽章時 method 用 `GET`、path 用 `/api/v1/whoami`、body 雜湊用空位元組陣列的
+SHA-256（`e3b0c442…`）。
 
 ```json
 {
@@ -432,8 +534,25 @@ GET https://notify.example.com/api/v1/whoami
 }
 ```
 
-**接入時第一支要打的就是這個。** 它同時回答三個問題：憑證有沒有效、簽章寫對了沒、
-我有哪些權限。`null` 代表使用系統預設值。
+| 欄位 | 怎麼讀 |
+|---|---|
+| `clientId` | 確認你用的是你以為的那組憑證 |
+| `boundLineUserId` | `null` = SERVICE 憑證，**不能**用 `target.type = SELF`（會回 `CLIENT_NOT_BOUND`） |
+| `scopes` | 已排序的 API 字串形式。決定你能用哪些 `target.type`，對照 §2 |
+| `rateLimitPerMin` | `null` = 用系統預設（60 req/min） |
+| `dailyMessageQuota` | `null` = 不限；有數字時那是**每日收件人數**上限 |
+
+診斷用法：
+
+| 現象 | 結論 |
+|---|---|
+| `whoami` 200 但發通知 401 | GET 空 body 的簽章已通過；再檢查 POST 的實際 body bytes、path、timestamp 與 nonce |
+| `whoami` 401 `AUTH_INVALID_SIGNATURE` | client id 或 secret 錯，或 canonical string 組錯（§10） |
+| `whoami` 401 `AUTH_TIMESTAMP_SKEW` | 本機時鐘要校時 |
+| `whoami` 200 但發通知 403 | scope 不足，比對回傳的 `scopes` 與 §2 的表 |
+
+**`whoami` 看不到「預設通知對象」**，那是管理端的設定（§4.2.1）。
+省略 `target` 卻拿到 `400 VALIDATION_ERROR`，就代表管理者還沒替你設定。
 
 ---
 
@@ -470,18 +589,25 @@ GET https://notify.example.com/api/v1/whoami
 | 404 | `NOT_FOUND` | 查不到，或不是你的 | — |
 | 409 | `IDEMPOTENCY_CONFLICT` | 同一把 key 送了不同內容 | 換一把 key |
 | 413 | `PAYLOAD_TOO_LARGE` | body 超過 64 KiB | 縮短內容 |
-| 429 | `RATE_LIMITED` | 超過每分鐘請求數 | 退避後重試 |
+| 429 | `RATE_LIMITED` | 超過每分鐘請求數 | 依 `Retry-After` 秒數退避後重試 |
 | 429 | `CLIENT_QUOTA_EXCEEDED` | 超過每日收件人數配額 | 等待或請管理者調高 |
+| 429 | `LINE_MONTHLY_QUOTA_EXCEEDED` | 保留碼。**目前伺服器沒有任何地方會回它**，列出來只是因為它在契約的 enum 裡 | — |
 | 500 | `INTERNAL_ERROR` | 伺服器問題 | 退避重試，附上 `requestId` 回報 |
+
+上表是目前公開 API 會遇到的錯誤。版本更新可能新增 code，所以 `default` 分支請當成「未知錯誤」處理，不要當成成功。
+
+`error.requestId` 與回應的 `X-Request-Id` header 同值，回報問題時附上它。
 
 ### 該重試與不該重試
 
 | 一律不重試 | 退避後可重試 |
 |---|---|
-| `VALIDATION_ERROR` | `RATE_LIMITED` |
+| `VALIDATION_ERROR` | `RATE_LIMITED`（依 `Retry-After`） |
 | `SCOPE_DENIED` | `INTERNAL_ERROR` |
 | `URI_HOST_NOT_ALLOWED` | 連線失敗 / 逾時 |
-| `IDEMPOTENCY_CONFLICT` | |
+| `IDEMPOTENCY_CONFLICT` | `CLIENT_QUOTA_EXCEEDED`（等窗口滑掉，可能要數小時） |
+| `CLIENT_NOT_BOUND` / `NO_RECIPIENT` | |
+| `PAYLOAD_TOO_LARGE` / `NOT_FOUND` | |
 | `AUTH_*`（先修好設定） | |
 
 **逾時特別注意**：請求可能其實已經被受理，只是回應沒回來。重試時務必沿用**同一把
@@ -489,9 +615,26 @@ GET https://notify.example.com/api/v1/whoami
 
 ### 速率限制
 
+兩層限制，錯誤碼不同，別搞混：
+
+**每分鐘請求數（`RATE_LIMITED`）**
+
 - 預設每個 client **每分鐘 60 個請求**（可個別調整，查 `whoami` 的 `rateLimitPerMin`）
-- 回應**不含** `Retry-After` header，請自行退避
-- 每日配額以**收件人數**計，不是請求數。`dailyMessageQuota` 為 `null` 代表不限
+- token bucket：容量就是每分鐘上限，並且是**連續補充**的，不是整分鐘歸零。
+  所以被擋之後不必等到下一分鐘，等幾秒就會有新的 token
+- 429 回應**會帶 `Retry-After` header**（單位秒，最小 1）。優先照它退避
+- 計數維度只有 `clientId` —— 不分端點、不分方法。**查詢也算**
+- 未通過驗簽的請求不計數（先驗簽、再限流）
+
+**每日配額（`CLIENT_QUOTA_EXCEEDED`）**
+
+- 以**收件人數**計，不是請求數。一次送給 300 人就算 300
+- 視窗是**滾動的 24 小時**，不是自然日，所以不會在午夜整批釋放
+- `whoami` 的 `dailyMessageQuota` 為 `null` 代表不限
+- 錯誤訊息會寫出「已用 / 上限 / 這次需要多少」，可以直接拿來決定是要等還是要縮小批量
+- 冪等重播不會重複扣配額（見 §4.6）
+- **這個 429 不帶 `Retry-After`** —— `Retry-After` 只有 `RATE_LIMITED` 才有。
+  拿到 `CLIENT_QUOTA_EXCEEDED` 卻讀不到 `Retry-After` 是正常的，不要因此當成錯誤
 
 ---
 
@@ -834,10 +977,12 @@ function Send-NotifyLine {
     )
 
     $path = "/api/v1/notifications"
-    $json = ConvertTo-Json -Compress @{
-        target  = @{ type = $Target }
-        message = @{ text = $Text }
-    }
+    # 一定要用 [ordered]。普通 @{} 是雜湊表，PowerShell 不保證列舉順序，
+    # 送出的 JSON 欄位順序會跟你以為的不一樣（功能上仍可用，但對不上 §3.4 的測試向量）。
+    $json = ConvertTo-Json -Compress ([ordered]@{
+        target  = [ordered]@{ type = $Target }
+        message = [ordered]@{ text = $Text }
+    })
     # 先固定 bytes，再對「同一份 bytes」算雜湊並送出
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
 
@@ -900,7 +1045,11 @@ public final class NotifyLineClient {
     }
 
     public String notify(String text, String target) throws Exception {
-        // 先固定 bytes，再對「同一份 bytes」算雜湊並送出
+        // 先固定 bytes，再對「同一份 bytes」算雜湊並送出。
+        //
+        // ⚠️ 這裡的手工跳脫只處理 \ 與 "，足夠跑通範例，但**不足以正式使用**：
+        //    text 若含換行或其他控制字元會產生不合法的 JSON，伺服器直接回 400。
+        //    正式環境請改用 Jackson／Gson 產生 byte[]，再對那份 byte[] 簽章。
         String json = """
                 {"target":{"type":"%s"},"message":{"text":"%s"}}"""
                 .formatted(target, text.replace("\\", "\\\\").replace("\"", "\\\""));
@@ -964,8 +1113,10 @@ public final class NotifyLineClient {
 - [ ] 打 `POST /api/v1/notifications`，`target.type` 用 `whoami` 顯示的 scope 對應的型別
 - [ ] 確認收到 202 且拿得到 `notificationId`
 - [ ] 等 3 秒後 `GET /api/v1/notifications/{id}`，確認 `status` 是 `SUCCEEDED`
-- [ ] 加上 `Idempotency-Key`，並確保逾時重試時沿用同一把
+- [ ] 加上 `Idempotency-Key`，並確保逾時重試時沿用同一把、body bytes 一個都不改
 - [ ] 錯誤處理依 `error.code` 分支，區分「可重試」與「不可重試」
+- [ ] 429 時讀 `Retry-After` header 決定退避秒數
+- [ ] 記錄回應的 `X-Request-Id`，出問題才有東西可以回報
 - [ ] secret 從環境變數或 secret manager 讀取，不在原始碼裡
 
 ## 10. 401 的排查順序
@@ -982,3 +1133,12 @@ public final class NotifyLineClient {
 8. **client id 打錯或憑證已作廢？** 這兩種也回同一個錯誤碼
 
 前七項都可以用 §3.4 的測試向量離線驗證，不需要連線。
+
+另外兩個不會被測試向量抓到、但實務上出現過的：
+
+- **header 值前後夾了空白或換行。** 伺服器對 `X-Timestamp`／`X-Nonce` 會 `trim()`
+  才組 canonical string，你沒 trim 就會對不上
+- **path 被中間層改寫。** 反向代理加了前綴、或把 `//` 正規化掉，伺服器看到的
+  path 就不是你簽的那一個。用 `curl` 直打服務位址比對一次即可排除
+
+排到最後仍然只有發通知失敗、`whoami` 正常，最常見是 §3.3 的 body bytes 不一致；仍要依實際 `error.code` 檢查 path、nonce、timestamp 與 scope。

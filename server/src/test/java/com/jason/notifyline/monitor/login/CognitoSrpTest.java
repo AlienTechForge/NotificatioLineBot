@@ -174,12 +174,12 @@ class CognitoSrpTest {
         @Test
         @DisplayName("poolName 去掉 region 前綴")
         void poolNameStripsRegion() {
-            assertThat(CognitoSrp.poolNameOf("eu-west-2_FhQHPoX2z")).isEqualTo("FhQHPoX2z");
+            assertThat(CognitoSrp.poolNameOf("eu-west-2_Example123")).isEqualTo("Example123");
         }
 
         @ParameterizedTest
         @DisplayName("userPoolId 格式不對就拒絕，不會安靜地算出錯的簽章")
-        @CsvSource({"FhQHPoX2z", "eu-west-2_", "''"})
+        @CsvSource({"Example123", "eu-west-2_", "''"})
         void poolNameRejectsMalformed(String input) {
             assertThatThrownBy(() -> CognitoSrp.poolNameOf(input))
                     .isInstanceOf(IllegalArgumentException.class);

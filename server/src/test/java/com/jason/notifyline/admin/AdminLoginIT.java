@@ -82,7 +82,7 @@ class AdminLoginIT extends PostgresIntegrationTest {
 
     private String createBody(String name) {
         return objectMapper.writeValueAsString(new AdminDto.CreateLoginRequest(
-                name, null, "eu-west-2", "eu-west-2_FhQHPoX2z", "1h3khfsa958g8qa0gge2dnqvka",
+                name, null, "eu-west-2", "eu-west-2_Example123", "exampleclientid1234567890",
                 "student@example.com", PASSWORD, "Authorization", "{token}"));
     }
 
@@ -146,7 +146,7 @@ class AdminLoginIT extends PostgresIntegrationTest {
         @DisplayName("region 與 userPoolId 前綴不一致 → 400")
         void mismatchedRegionRejected() throws Exception {
             String body = objectMapper.writeValueAsString(new AdminDto.CreateLoginRequest(
-                    "bad", null, "us-east-1", "eu-west-2_FhQHPoX2z", "abc123",
+                    "bad", null, "us-east-1", "eu-west-2_Example123", "abc123",
                     "a@example.com", PASSWORD, null, null));
 
             mockMvc.perform(post("/admin/api/logins").with(admin()).with(csrf())
@@ -158,7 +158,7 @@ class AdminLoginIT extends PostgresIntegrationTest {
         @DisplayName("header 模板沒有 {token} → 400")
         void templateWithoutTokenRejected() throws Exception {
             String body = objectMapper.writeValueAsString(new AdminDto.CreateLoginRequest(
-                    "bad", null, "eu-west-2", "eu-west-2_FhQHPoX2z", "abc123",
+                    "bad", null, "eu-west-2", "eu-west-2_Example123", "abc123",
                     "a@example.com", PASSWORD, "Authorization", "Bearer nothing-here"));
 
             mockMvc.perform(post("/admin/api/logins").with(admin()).with(csrf())
@@ -188,7 +188,7 @@ class AdminLoginIT extends PostgresIntegrationTest {
             byte[] before = logins.findById(id).orElseThrow().getPasswordCiphertext();
 
             String body = objectMapper.writeValueAsString(new AdminDto.UpdateLoginRequest(
-                    "cas renamed", "eu-west-2", "eu-west-2_FhQHPoX2z", "1h3khfsa958g8qa0gge2dnqvka",
+                    "cas renamed", "eu-west-2", "eu-west-2_Example123", "exampleclientid1234567890",
                     "student@example.com", "", "Authorization", "{token}", true));
 
             mockMvc.perform(put("/admin/api/logins/" + id).with(admin()).with(csrf())
@@ -213,7 +213,7 @@ class AdminLoginIT extends PostgresIntegrationTest {
             assertThat(logins.findById(id).orElseThrow().getTokenCiphertext()).isNotNull();
 
             String body = objectMapper.writeValueAsString(new AdminDto.UpdateLoginRequest(
-                    "cas", "eu-west-2", "eu-west-2_FhQHPoX2z", "1h3khfsa958g8qa0gge2dnqvka",
+                    "cas", "eu-west-2", "eu-west-2_Example123", "exampleclientid1234567890",
                     "somebody-else@example.com", "", "Authorization", "{token}", true));
 
             mockMvc.perform(put("/admin/api/logins/" + id).with(admin()).with(csrf())

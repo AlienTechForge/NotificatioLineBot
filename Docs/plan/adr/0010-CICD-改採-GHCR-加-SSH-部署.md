@@ -1,5 +1,7 @@
 # ADR-0010 — image 走 GHCR，部署仍由 self-hosted runner 執行
 
+> 校訂日期：2026-09-21。依 2026-09-21 main 的程式碼核對；歷史方案與未實作項目另行標示。
+
 **狀態**：Accepted ｜ 2026-08-19
 **關係**：**補充**（不是取代）[ADR-0006](0006-CICD-採-self-hosted-runner.md)
 
@@ -22,10 +24,8 @@
 [ADR-0006](0006-CICD-採-self-hosted-runner.md) 決定用 self-hosted runner 部署。
 實際環境：
 
-- 組織 **AlienTechForge** 已有註冊在**組織層級**的 runner `alien-server`（`status=online`，
-  labels `[self-hosted, Linux, X64]`）
-- 組織層級的 runner **只服務組織內的 repo** —— 所以 repo 必須放在該組織下，
-  放在個人帳號下觸發不到
+- 部署主機已註冊 self-hosted runner，workflow 以 labels `[self-hosted, Linux, X64]` 選取
+- runner 的 repo／組織存取範圍由 GitHub 設定控制，不在文件中固定主機名稱
 
 同時，使用者提供的 CI/CD 範本要求 image 推上 GHCR。
 
@@ -39,7 +39,7 @@
 | `image` | GitHub-hosted `ubuntu-latest` | build 並推 GHCR，打 `sha-<短碼>` tag |
 | `deploy` | **self-hosted `[self-hosted, Linux, X64]`** | `docker compose pull` + `up -d` + 健康檢查 + 回滾 |
 
-repo 置於 **AlienTechForge** 組織下。
+repo 與 runner 必須位於彼此允許的存取範圍。
 
 ## 理由
 
@@ -57,7 +57,7 @@ runner **就在那台 server 上**，所以：
 - **不需要 SSH 金鑰**，不用把私鑰放進 GitHub Secrets
 - **不需要對外開 22 port**
 - 健康檢查直接打 `127.0.0.1`，不繞外網
-- `.env` 由 server 端管理，機密從頭到尾不進 GitHub
+- `.env` 由 deploy job 在 runner 上依 GitHub Secrets / Variables 產生，檔案不進版控
 
 這是相對「SSH 部署」明確更好的一點：少了一把能登入 server 的長期憑證。
 
@@ -88,7 +88,7 @@ deploy job 傳入確切的 sha tag，於是每次部署都對應一個 commit，
 
 | 後果 | 緩解 |
 |---|---|
-| **repo 必須留在組織下** | 組織層級的 runner 的固有限制。轉出組織就會失去部署能力 |
+| repo 與 runner 存取範圍必須相容 | 搬移 repo 或調整 runner group 時同步檢查 Actions 權限 |
 | runner 會在 server 上執行 repo 中的程式碼 | **repo 保持 private**；`permissions` 最小化；不使用 `pull_request_target` |
 | runner 是要維運的常駐服務 | 它掛掉時 workflow 會靜默排隊而非明顯失敗，需要留意 |
 | 部署期間短暫停機 | 通知留在 outbox 佇列，重啟後自動補送，不掉單 |

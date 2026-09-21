@@ -1,6 +1,10 @@
 # ADR-0005 — Admin UI 置於同一 repo、打包進 jar
 
-**狀態**：Accepted ｜ 2026-08-18（Phase 2 實作）
+> 校訂日期：2026-09-21。依 2026-09-21 main 的程式碼核對；歷史方案與未實作項目另行標示。
+
+**狀態**：Superseded by [ADR-0012](0012-Admin-UI-採原生靜態資源.md) ｜ 2026-09-21
+
+> 保留本文作為當時方案紀錄。實際成品仍維持「同一 repo、同一 jar」，但沒有採用 React、Vite 或 Ant Design。
 
 ## 背景
 

@@ -10,6 +10,10 @@
 .github
 .gitattributes
 .gitignore
+.codegraph/
+.agents/
+.claude/
+.worktrees/
 
 # ── 建置產物（image 內會重新建置）────────────────
 target/

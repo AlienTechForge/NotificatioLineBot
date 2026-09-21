@@ -18,8 +18,8 @@ import java.util.regex.Pattern;
  * 因為方便就加一個「自訂端點」欄位——那會把這個保證整個拆掉。
  *
  * @param region     AWS region，如 {@code eu-west-2}
- * @param userPoolId 如 {@code eu-west-2_FhQHPoX2z}
- * @param clientId   app client id，如 {@code 1h3khfsa958g8qa0gge2dnqvka}
+ * @param userPoolId 如 {@code eu-west-2_Example123}
+ * @param clientId   app client id，如 {@code exampleclientid1234567890}
  */
 public record CognitoEndpoint(String region, String userPoolId, String clientId) {
 
@@ -46,7 +46,7 @@ public record CognitoEndpoint(String region, String userPoolId, String clientId)
         }
     }
 
-    /** {@code eu-west-2_FhQHPoX2z} → {@code FhQHPoX2z}，簽章要用的就是這一段。 */
+    /** {@code eu-west-2_Example123} → {@code Example123}，簽章要用的就是這一段。 */
     public String poolName() {
         return CognitoSrp.poolNameOf(userPoolId);
     }

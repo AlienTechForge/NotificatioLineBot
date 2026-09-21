@@ -1,5 +1,7 @@
 # ADR-0007 — 非同步採 DB outbox 而非訊息中介
 
+> 校訂日期：2026-09-21。依 2026-09-21 main 的程式碼核對；歷史方案與未實作項目另行標示。
+
 **狀態**：Accepted ｜ 2026-08-18
 
 ## 背景
@@ -28,7 +30,7 @@
 |---|---|---|
 | 即時派送 | `@Async` + `ThreadPoolTaskExecutor` | 正常路徑，低延遲 |
 | 落地 | `notification_delivery` 的 `PENDING` 狀態 | 真相來源 |
-| 補償 | `@Scheduled` 每 30 秒 + `SELECT … FOR UPDATE SKIP LOCKED` | 撿回沒送成的 |
+| 補償 | `@Scheduled` 預設每 10 秒 + `SELECT … FOR UPDATE SKIP LOCKED` | 撿回可取件的批次 |
 
 取件查詢：
 
@@ -36,7 +38,7 @@
 SELECT * FROM notification_delivery
  WHERE status = 'PENDING' AND next_attempt_at <= now()
  ORDER BY priority, next_attempt_at
- LIMIT 20
+ LIMIT 10
    FOR UPDATE SKIP LOCKED;
 ```
 
@@ -87,7 +89,7 @@ Kafka / RabbitMQ / Redis Stream 都能做到，而且做得更好——但要付
 | **Kafka / RabbitMQ** | 多一個服務要維運；仍需要 outbox 表解決雙寫一致性；當前量級用不到其吞吐量 |
 | **Redis 佇列** | 比 Kafka 輕，但仍多一個服務；持久性保證弱於 PostgreSQL；且同樣有雙寫一致性問題 |
 | **Quartz 當工作佇列** | Quartz 是排程器不是佇列。用它做一次性任務會產生大量 trigger 記錄，且語意不合。Phase 3 的定時通知會用 Quartz，但那是排程，不是派送 |
-| **只用 `@Scheduled` 輪詢，不用 `@Async`** | 可行且更簡單，但所有通知都要等下一次輪詢（最多 30 秒延遲）。加上 `@Async` 讓正常路徑是即時的，輪詢只當補償 |
+| **只用 `@Scheduled` 輪詢，不用 `@Async`** | 可行且更簡單，但所有通知都要等下一次輪詢（預設最多 10 秒延遲）。加上 `@Async` 讓正常路徑是即時的，輪詢負責補償 |
 
 ## 後果
 
@@ -104,7 +106,7 @@ Kafka / RabbitMQ / Redis Stream 都能做到，而且做得更好——但要付
 | 後果 | 影響 / 緩解 |
 |---|---|
 | 每批多幾次 DB 往返 | 相對於數百毫秒的 LINE 呼叫可忽略 |
-| 輪詢間隔造成補償路徑的延遲（最多 30 秒） | 正常路徑走 `@Async`，即時。補償只在異常時生效 |
+| 輪詢間隔造成補償路徑的延遲（預設最多 10 秒） | 正常路徑走 `@Async`，輪詢仍會接手落地的 PENDING 工作 |
 | 資料庫要承擔佇列負載 | 量級小；`idx_delivery_pickup` partial index 讓取件查詢很快 |
 | **`notification_delivery` 會無限增長** | 必須有保留政策（[04 §11](../04-資料模型.md#11-資料保留與清理缺口-g7)）。這是本決策帶來的直接負債 |
 | 沒有現成的死信佇列機制 | `FAILED` 狀態的批次留在表中，Phase 2 Admin 提供手動重送 |

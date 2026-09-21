@@ -1,0 +1,267 @@
+# =====================================================================
+#  notify.example.com — 統一 LINE Notification Service 範例
+#
+#  複製後依實際環境改名，例如：/etc/nginx/conf.d/notify.example.com.conf
+#       （或你現有的 sites-available + symlink 慣例）
+#
+#  上游是 docker-compose 起的 app，只綁 127.0.0.1:${APP_PORT}。
+#  預設 19080 —— 8080 已被占用。若要換 port，改這裡的 upstream 與 .env 的
+#  APP_PORT，兩邊要一致。
+# =====================================================================
+
+# 管理介面存取控制與登入限速。
+#
+# 網站掛在 Cloudflare 橘雲後面，nginx 直接看到的 $remote_addr 是 Cloudflare
+# 節點 IP，不是真實訪客。真實訪客 IP 在 CF-Connecting-IP header 裡。
+#
+# 這裡「不」用 set_real_ip_from 還原（那要維護 Cloudflare 的 IP 段），改成
+# 直接讀 header。代價見下方 admin_denied 的安全說明。
+
+# 密鑰字串比預設的 map bucket（64 bytes）長，不加這行 nginx 會在啟動時報
+# 「could not build map_hash, you should increase map_hash_bucket_size」。
+map_hash_bucket_size 128;
+
+# 管理介面的門禁。
+#
+# 「不」用 IP 白名單 —— 訪客可能走 IPv6，而家用 IPv6 通常會變動，無法固定比對。
+# 改成檢查一個「只有經過 Cloudflare 才會帶上」的密鑰 header：
+#   Cloudflare Transform Rule 對 /admin* 注入  X-Admin-Gate: <隨機密鑰>
+#   直連 origin 的人不知道那個值 → 天然防偽造，且與 IP 版本無關。
+#
+# 密鑰本身「不進版控」，放在 server 上的獨立檔案：
+#   /etc/nginx/conf.d/admin-gate.map   （root:root, chmod 640）
+# 內容就是這個 map（把 CHANGE_ME 換成真正的密鑰）：
+#
+#   map $http_x_admin_gate $admin_denied {
+#       default            1;
+#       "你的隨機密鑰"      0;
+#   }
+#
+# 見 deploy/nginx/admin-gate.map.example，以及檔尾的 SECURITY 說明。
+include /etc/nginx/conf.d/admin-gate.map;
+
+# 登入限速。走 Cloudflare 時 $remote_addr 是節點 IP，但密鑰已經把非白名單擋在
+# 門外，這裡的限速是對「已通過密鑰但狂試密碼」的第二道防線，用 CF-Connecting-IP
+# 當鍵仍然是對的（同一訪客同一桶）。
+limit_req_zone $http_cf_connecting_ip zone=notifyline_admin_login:10m rate=5r/m;
+
+upstream notifyline {
+    # 與 .env 的 APP_PORT 一致
+    server 127.0.0.1:19080;
+    keepalive 16;
+}
+
+# ── HTTP → HTTPS ─────────────────────────────────────────────────────
+server {
+    listen 80;
+    listen [::]:80;
+    server_name notify.example.com;
+    return 301 https://$server_name$request_uri;
+}
+
+# ── HTTPS ────────────────────────────────────────────────────────────
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name notify.example.com;
+
+    ssl_certificate     /etc/nginx/ssl/notify.example.com/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/notify.example.com/private.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    # 這是純 JSON API，body 很小。
+    # 應用層本身就把 request body 上限設在 64KB（超過回 413），
+    # 這裡設 1M 只是提早擋掉明顯異常的請求，不用跟 MinIO 一樣開到 10G。
+    client_max_body_size 1m;
+
+    # 通知服務的請求都是短的；不需要 MinIO 那種 300s 超時。
+    # 但要比 LINE 的 webhook 逾時寬鬆一點，避免我們這邊還在處理就被 nginx 切掉。
+    proxy_connect_timeout 5s;
+    proxy_send_timeout    30s;
+    proxy_read_timeout    30s;
+
+    # ModSecurity 對 JSON POST 常有誤判，會讓 LINE 的 webhook 被擋在門外。
+    modsecurity off;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # ⚠️ 絕對不要開 proxy_intercept_errors 或 include 自訂錯誤頁。
+    #
+    # 這個 API 的 4xx 回應「本身就是契約的一部分」——
+    # 呼叫端要靠 body 裡的 {"error":{"code":"AUTH_NONCE_REPLAY",...}} 分支處理。
+    # 換成 nginx 的 HTML 錯誤頁，對方只會看到一坨看不懂的東西。
+    #
+    # 同理，LINE webhook 驗簽失敗時我們回 4xx 是正常行為，不是「壞掉」。
+    # proxy_intercept_errors on;                      ← 不要
+    # include /etc/nginx/snippets/error-pages.conf;   ← 不要
+
+    # ── LINE Webhook ─────────────────────────────────────────────────
+    # 單獨拉出來是為了獨立的存取日誌 —— webhook 出問題時最需要查的就是它。
+    location = /line/webhook {
+        modsecurity off;
+
+        proxy_pass http://notifyline;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 驗簽是對「原始 body bytes」做 HMAC。任何改動 body 的行為都會讓
+        # 簽章對不上，而錯誤訊息只會是一句「Invalid API signature」。
+        # 這裡不做任何 body 轉換，也不要在此開 gzip/sub_filter 之類的模組。
+        proxy_request_buffering off;
+        proxy_buffering off;
+
+        access_log /var/log/nginx/notifyline.webhook.log;
+    }
+
+    # ── 通知 API ─────────────────────────────────────────────────────
+    location /api/ {
+        modsecurity off;
+
+        proxy_pass http://notifyline;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 同上：HMAC 簽章對 body bytes 敏感，不做任何轉換。
+        proxy_request_buffering off;
+        proxy_buffering off;
+    }
+
+    # ── 金鑰領取的一次性連結（T6）─────────────────────────────────
+    location /enroll/ {
+        modsecurity off;
+
+        proxy_pass http://notifyline;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 這個頁面會顯示 client secret，且只顯示一次。
+        # 應用層已經送了 no-store，這裡再保險一次，確保任何中間層都不留副本。
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    # ── 健康檢查 ─────────────────────────────────────────────────────
+    # 只放行 health，不放行整個 /actuator ——
+    # /actuator/env、/actuator/configprops 之類會洩漏設定值。
+    # 用前綴比對而非 `location =`，才涵蓋 /actuator/health/liveness
+    # 與 /actuator/health/readiness 這兩個子路徑。
+    location /actuator/health {
+        proxy_pass http://notifyline;
+        proxy_set_header Host $http_host;
+        access_log off;
+    }
+
+    # ── 管理介面（ADR-0011）────────────────────────────────────────
+    #
+    # ⚠️ 這個路徑能改變所有通知的流向。開放前先確認：
+    #     1. APP_ADMIN_USERNAME / APP_ADMIN_PASSWORD 兩個 Secret 都設了
+    #        （沒設的話應用根本不註冊這條路徑，這裡會回 404）
+    #     2. 密碼夠強 —— 應用層要求至少 12 字元，但那只是下限
+    #
+    # 已用密鑰 header 門禁（見檔首的 map $admin_denied）。安全前提見 location 內說明。
+    #
+    # 沒有結尾斜線的 /admin 不會被下面的 `location /admin/` 前綴比對命中，
+    # 會落到最後的 `return 404`。手打網址時少一個斜線就進不去，
+    # 而 404 完全看不出原因。
+    location = /admin {
+        return 301 /admin/;
+    }
+
+    location /admin/ {
+        # 只允許帶有正確 X-Admin-Gate 值的請求。密鑰由反向代理注入，
+        # 並存放於未進版控的 admin-gate.map。
+        if ($admin_denied) { return 403; }
+
+        modsecurity off;
+
+        proxy_pass http://notifyline;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 後台頁面不該被快取或被嵌進別人的網頁
+        add_header Cache-Control "no-store" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    # 登入端點單獨限速。
+    #
+    # 必須放在 /admin/ 之後 —— nginx 的 `location =` 精確比對優先於前綴比對，
+    # 所以順序其實不影響匹配，但寫在一起比較容易看出兩者的關係。
+    #
+    # burst=3 允許打錯幾次密碼；nodelay 讓那幾次立刻處理而不是排隊。
+    location = /admin/login {
+        if ($admin_denied) { return 403; }
+
+        limit_req zone=notifyline_admin_login burst=3 nodelay;
+        limit_req_status 429;
+
+        modsecurity off;
+
+        proxy_pass http://notifyline;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        add_header Cache-Control "no-store" always;
+
+        access_log /var/log/nginx/notifyline.adminlogin.log;
+    }
+
+    # ── 其餘一律拒絕 ─────────────────────────────────────────────────
+    # 預設拒絕而非預設放行：日後應用新增端點時，要先在這裡明確開放，
+    # 不會有人不小心把管理介面暴露出去。
+    location / {
+        return 404;
+    }
+
+    access_log /var/log/nginx/notifyline.access.log;
+    error_log  /var/log/nginx/notifyline.error.log;
+}
+
+# =====================================================================
+#  SECURITY — 管理介面門禁現況
+#
+#  現在採「密鑰 header」門禁（方案 C）：Cloudflare Transform Rule 對 /admin*
+#  注入 X-Admin-Gate，nginx 比對 admin-gate.map 裡的密鑰。直連 origin 的人
+#  沒有那個 header → 被擋。與訪客 IP 版本（v4/v6）、是否浮動都無關。
+#
+#  這比「比對 CF-Connecting-IP」更好：後者信任一個可被直連偽造的 IP header，
+#  且在浮動 IPv6 下根本無法固定白名單。
+#
+#  仍要更嚴的話（方案 B，可與 C 疊加）：防火牆只放行 Cloudflare 的 IP 段連
+#  origin 的 443，杜絕一切直連。代價是要維護 Cloudflare IP 段
+#  （https://www.cloudflare.com/ips，偶有增修）。
+# =====================================================================

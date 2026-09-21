@@ -138,7 +138,7 @@ class AdminLoginTestEndpointIT extends PostgresIntegrationTest {
 
     private Long createLogin() throws Exception {
         String body = objectMapper.writeValueAsString(new AdminDto.CreateLoginRequest(
-                "cas", null, "eu-west-2", "eu-west-2_FhQHPoX2z", "1h3khfsa958g8qa0gge2dnqvka",
+                "cas", null, "eu-west-2", "eu-west-2_Example123", "exampleclientid1234567890",
                 "student@example.com", "hunter2", "Authorization", "{token}"));
         String response = mockMvc.perform(post("/admin/api/logins").with(admin()).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON).content(body))

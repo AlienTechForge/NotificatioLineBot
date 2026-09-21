@@ -1,299 +1,134 @@
-# 部署到 server（notify.example.com）
+# 部署與操作指南
 
-**部署已全自動化。** push 到 `main` 就會：
+> 校訂日期：2026-09-21；以 `.github/workflows/ci-cd.yml`、`admin.yml` 與 Compose 為準。
+> 文件使用 `notify.example.com` 作為示例；實際網址、網域與帳號由部署環境提供。
 
-```
-GitHub-hosted          self-hosted runner「alien-server」
-  test   mvn verify  →  deploy  建目錄 → 產生 .env → pull image
-  image  推 GHCR              → up -d → 健康檢查 → 失敗自動回滾
-```
+## 1. 實際部署流程
 
-不需要 SSH 金鑰、不需要對外開 22 port、不需要手動登入 server。
-runner 就在那台機器上。設計理由見
-[ADR-0006](../Docs/plan/adr/0006-CICD-採-self-hosted-runner.md) 與
-[ADR-0010](../Docs/plan/adr/0010-CICD-改採-GHCR-加-SSH-部署.md)。
+main push：GitHub-hosted `Test` 執行 Maven verify → `Build & Push` 推 GHCR →
+self-hosted `[self-hosted, Linux, X64]` 的 `Deploy` 在主機執行 Docker Compose。
+PR 只跑測試；`v*` tag 會測試及建 image，但不是 main ref，不部署正式環境。
+手動 `workflow_dispatch` 選 main 時亦可部署。
 
-## 前提
+沒有 SSH deploy。部署目錄由 `DEPLOY_PATH` Variable 指定，未設使用 runner 的 `$HOME/notifyline`。
+CI 把 `docker/docker-compose.prod.yml` 複製為該處 `docker-compose.yml`，由 Secrets／Variables
+重建 `.env`；不要把在主機手改 `.env` 當成能跨部署保留的設定。
 
-| 項目 | 狀態 |
-|---|---|
-| repo 在 **AlienTechForge** 組織下 | ✅ 組織層級 runner 只服務組織內的 repo |
-| runner `alien-server` online | ✅ labels `[self-hosted, Linux, X64]` |
-| runner 使用者可用 docker | ✅ |
-| GitHub Secrets / Variables | ✅ 見下表 |
-| nginx 反向代理 | ✅ `deploy/nginx/notify.example.com.conf` |
+## 2. 前置設定
 
-### Secrets（機密，值不可見）
+- repo 有權使用一台標籤符合的 self-hosted runner，且 runner 使用者可以執行 Docker／Compose。
+- GitHub Actions Workflow permissions 允許 read/write；workflow 宣告 `contents: read`、`packages: write`。
+- 內建 `GITHUB_TOKEN` 用於 GHCR 登入，無需先建立 PAT 或 SSH key。
+- 反向代理、TLS 憑證、DNS、管理門禁須由部署者配置；CI 不安裝或更新 nginx。
+- 依目前單實例設計部署；跨實例的 rate limit、profile 排程與站台登入鎖尚未協調。
+
+### Secrets
 
 | 名稱 | 用途 |
 |---|---|
-| `LINE_CHANNEL_TOKEN` | 發訊息 |
+| `LINE_CHANNEL_TOKEN` | LINE 發送及 Profile 查詢 |
 | `LINE_CHANNEL_SECRET` | webhook 驗簽 |
-| `APP_SECRET_ENC_KEY` | 加密所有 client secret —— **務必另外備份**，見 [金鑰管理.md](金鑰管理.md) |
-| `DB_PASSWORD` | PostgreSQL |
+| `APP_SECRET_ENC_KEY` | 版本 1 的 AES key，32 bytes Base64 |
+| `APP_SECRET_ENC_KEY_V2` | 選填，版本 2 的 key；不得任意覆蓋舊版本 |
+| `DB_PASSWORD` | PostgreSQL 密碼 |
+| `APP_ADMIN_USERNAME`、`APP_ADMIN_PASSWORD` | 後台帳密，需一起設定或一起留空；密碼至少 12 字元 |
 
-### Variables（非機密）
+GitHub Secrets 是部署來源，主機 `.env` 是執行時副本。後台帳密都留空時，管理介面停用。
+key 的備份、全部加密欄位與輪替限制見 [金鑰管理](金鑰管理.md)。
 
-| 名稱 | 值 |
+### Variables
+
+| 名稱 | 說明／預設 |
 |---|---|
-| `APP_PUBLIC_BASE_URL` | `https://notify.example.com` |
-| `APP_ALLOWED_URI_HOSTS` | `example.com` |
-| `APP_PORT` | `19080` |
-| `DEPLOY_PATH` | 未設 → 預設 runner 家目錄下的 `notifyline/` |
-| `APP_OWNER_LINE_USER_ID` | 待設（加好友後傳「我的ID」取得） |
+| `APP_PUBLIC_BASE_URL` | 自行配置的 HTTPS 網址，如 `https://notify.example.com` |
+| `APP_ALLOWED_URI_HOSTS` | 通知內容允許的連結網域，逗號分隔；空值拒絕全部外部連結 |
+| `APP_OWNER_LINE_USER_ID` | 選填，啟動時標記為 owner 的 LINE User ID；此欄屬個人識別資料 |
+| `APP_PORT` | 主機 loopback port，預設 19080；容器固定 8080 |
+| `DB_USER` | 預設 notifyline |
+| `DEPLOY_PATH` | 可選部署路徑，runner 使用者必須可寫 |
+| `APP_SECRET_ENC_KEY_VERSION` | 新資料使用的 key 版本，預設 1 |
 
-> `.env` 由 deploy job 從上表產生，**單一真相來源**。
-> 輪替機密只要改 Secret 再重跑一次部署，不必登入 server。
->
-> 若要改回「`.env` 只在 server 上、CI 完全碰不到」，把 workflow 的
-> 「產生 .env」步驟換成「檢查 .env 是否存在」即可，其餘不動。
+`DB_URL`、prod profile 由 workflow 寫入。其他 application.yml 可調參數並不會自動由 GitHub
+Variables 透傳；若需部署自訂監控間隔等，須擴充 workflow 的 env 產生清單。
+Variables 並非 secret；部署網域與 LINE ID 若需隱藏，不能僅依賴變數名稱或 private repo。
 
----
+## 3. 啟動與版本
 
-## 0. 先確認 port
+一般直接推送 main 或重跑 CI/CD。部署使用 `sha-<commit 前 7 碼>` image，預先記錄
+目前容器的 image，健康檢查失敗時嘗試切回。
 
-8080 已被占用，預設改用 **19080**。先確認它是空的：
-
-```bash
-ss -ltnp | grep -E ':(19080|5432)\s' || echo "19080 與 5432 都沒被占用"
-```
-
-有衝突就換一個，並且**同時**改兩個地方：
-
-| 檔案 | 位置 |
-|---|---|
-| `.env` | `APP_PORT=19080` |
-| nginx 設定 | `upstream notifyline { server 127.0.0.1:19080; }` |
-
-> PostgreSQL 容器**沒有**對主機開 port，不會跟 server 上既有的 5432 衝突。
-
----
-
-## 1. 建立部署目錄與設定
-
-**server 上不需要 JDK / Maven / Node，也不需要 clone 整個 repo** ——
-image 由 CI 建好推到 GHCR，server 只要 Docker。
+需要手動操作時，在**已經準備好的部署目錄**使用：
 
 ```bash
-sudo mkdir -p /opt/notifyline && cd /opt/notifyline
-
-# compose 檔會由 CI 的 deploy job 自動送上來。
-# 手動先跑一次的話：
-curl -sSL -o docker-compose.yml   https://raw.githubusercontent.com/AlienTechForge/NotificatioLineBot/main/docker/docker-compose.prod.yml
-
-# .env 由你自己建立，永遠不經過 CI
-sudo nano .env
-```
-
-編輯 `.env`：
-
-```bash
-# LINE —— 從 LINE Developers Console 取得
-LINE_CHANNEL_TOKEN=<Messaging API 分頁 → Channel access token (long-lived) → Issue>
-LINE_CHANNEL_SECRET=<Basic settings → Channel secret>
-
-# 加密金鑰（保護所有 client secret）
-APP_SECRET_ENC_KEY=<openssl rand -base64 32 的輸出>
-
-APP_PUBLIC_BASE_URL=https://notify.example.com
-APP_ALLOWED_URI_HOSTS=example.com
-
-DB_URL=jdbc:postgresql://postgres:5432/notifyline
-DB_USER=notifyline
-DB_PASSWORD=<openssl rand -base64 24 的輸出>
-
-APP_PORT=19080
-SPRING_PROFILES_ACTIVE=prod
-```
-
-> **Channel ID 用不到** —— 我們的 app 只需要 Channel Secret（驗簽）與
-> Channel Access Token（發訊息）。Channel ID 是 LINE Login 才用的。
-
-權限收緊：
-
-```bash
-sudo chown root:root .env && sudo chmod 600 .env
-```
-
-> ⚠️ `APP_SECRET_ENC_KEY` **遺失就等於所有 client 憑證報廢**（無法解密，只能全部重發）。
->
-> 它是什麼、為什麼非要不可、怎麼備份、有沒有其他選項 ——
-> 見 [金鑰管理.md](金鑰管理.md)。**部署前先讀完那份。**
-
----
-
-## 2. 啟動
-
-**正常情況下你不用手動跑這步** —— CI 的 deploy job 會在 self-hosted runner
-（也就是這台 server）上自己完成登入、拉取、啟動。
-
-要手動先跑一次的話，需要有 `read:packages` scope 的 PAT：
-
-```bash
-echo "<你的 GitHub PAT>" | docker login ghcr.io -u <你的帳號> --password-stdin
+cd "$DEPLOY_PATH"
+export NOTIFYLINE_IMAGE='<已推送且可讀取的完整 image ref>'
+docker compose --env-file .env pull app
 docker compose --env-file .env up -d
+curl -fsS http://127.0.0.1:19080/actuator/health
 ```
 
-確認只綁在 localhost：
+私有 GHCR 若需手動登入，使用核准的短效憑證與 `--password-stdin`，不要把真值放進指令歷史。
+CI 本身使用 `GITHUB_TOKEN`。PostgreSQL 不公開 host port，app 僅綁 `127.0.0.1`。
 
-```bash
-ss -ltnp | grep 19080
-# 應該看到 127.0.0.1:19080，不是 0.0.0.0:19080
-curl -sS http://127.0.0.1:19080/actuator/health
-# {"groups":["liveness","readiness"],"status":"UP"}
-```
+健康檢查最多 90 次、每次間隔 2 秒（HTTP 耗時另計）。只有 health 步驟失敗且已有舊 image
+才會觸發現有 rollback；pull／up 失敗不一定回滾。回滾不還原 `.env` 或 DB schema，
+也沒有第二次健康驗證。不能把它視為所有故障都會自動復原的保證。
 
----
+## 4. nginx 與管理門禁
 
-## 3. nginx
+範本為 [`nginx/notifyline.conf.example`](nginx/notifyline.conf.example)。複製到主機後先修改
+`server_name`、憑證路徑、日誌路徑與 upstream port，再執行 `nginx -t` 後 reload。
+若 nginx 沒有 ModSecurity 模組，需移除相應指令；不要將範本直接當作已驗證的主機設定。
 
-```bash
-sudo cp deploy/nginx/notify.example.com.conf /etc/nginx/conf.d/
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-### 這份設定與你 MinIO 那份刻意不同的地方
-
-| 差異 | 理由 |
+| 路徑 | 現況 |
 |---|---|
-| `client_max_body_size 1m`（不是 10G） | 純 JSON API，應用層本身就把 body 上限設在 64KB |
-| 超時 30s（不是 300s） | 請求都很短。但仍比 LINE 的 webhook 逾時寬鬆 |
-| **不開** `proxy_intercept_errors`、**不 include** 錯誤頁 | 這個 API 的 4xx **本身就是契約** —— 呼叫端要靠 `{"error":{"code":"AUTH_NONCE_REPLAY"}}` 分支處理。換成 HTML 錯誤頁對方就看不懂了 |
-| 逐一列出 location，`location / { return 404; }` | 預設拒絕。日後新增端點要明確開放，不會有人不小心把管理介面暴露出去 |
-| `/actuator/health` 單獨開，不開整個 `/actuator` | `/actuator/env`、`/actuator/configprops` 會洩漏設定值 |
-| `proxy_request_buffering off` + 不做 body 轉換 | **HMAC 驗簽是對原始 body bytes 做的**。任何改動 body 的模組（gzip、sub_filter）都會讓簽章對不上，而錯誤只會是一句「Invalid signature」 |
-| `modsecurity off` | 與你 MinIO 的處理一致 —— ModSecurity 對 JSON POST 常誤判，會把 LINE 的 webhook 擋在門外 |
+| `/api/` | 轉送通知 API，`/api/v1/**` 由應用 HMAC 保護 |
+| `/line/webhook` | LINE SDK 驗簽；proxy 不改 body bytes |
+| `/actuator/health` 及子路徑 | 健康檢查；其他 actuator 路徑不開放 |
+| `/admin` | 轉到 `/admin/` |
+| `/admin/` | `X-Admin-Gate` 門禁，再由應用帳密／session 驗證 |
+| `/admin/login` | 同上，另有 nginx 5 requests/min、burst 3 限速 |
+| `/enroll/` | proxy 預留，但應用尚無 enrollment 頁面 |
+| 其他 | 404 |
 
-> `listen 443 ssl http2;` 沿用你現有寫法。nginx 1.25.1+ 建議改成
-> `listen 443 ssl;` + 獨立的 `http2 on;`，但既有寫法仍可運作，這裡不動它。
+`admin-gate.map.example` 需填入獨立隨機值，存成主機上的 `/etc/nginx/conf.d/admin-gate.map`。
+代理端對 `/admin*` 設定同值的 `X-Admin-Gate`，並覆寫訪客自帶 header。
+此 header 只證明請求經過代理規則；如果規則對所有訪客注入，它**不是**個別使用者授權。
+仍需登入；如只允許特定人，另設代理存取政策。`CF-Connecting-IP` 僅作限流 key，需可信代理
+邊界才能信任；application 本身沒有後台登入 rate limit。
 
----
+使用 Cloudflare 時，以符合憑證驗證的 TLS 設定連 origin；正式設定以代理平台為準。
+不要為 webhook 全面關閉網站防護；排除规则僅限必要的 webhook 路徑。
 
-## 4. Cloudflare
+## 5. 驗證
 
-DNS 目前是 proxied（橘雲）。要注意兩點：
+1. loopback `/actuator/health` 回 UP，再檢查對外 HTTPS 健康路徑。
+2. 未簽章 webhook 應被拒，正確簽章的 `events: []` 應為 200。
+3. LINE Developers Console 設定 `<服務網址>/line/webhook`、開啟 Use webhook；需重送時另啟用 Webhook redelivery。
+4. 檢查 `/actuator/env`、`/actuator/configprops` 不公開。管理路徑依 gate、是否設定帳密、登入狀態回 403／404／登入頁，不是全部固定 404。
+5. 用測試帳號驗證加好友、我的ID、封鎖；真實通知須使用已授權收件人。
 
-1. **SSL/TLS 模式**必須是 **Full (strict)** 或 **Full**。若是 Flexible，Cloudflare 會用 HTTP 連 origin，nginx 的 443 收不到。
-2. **WAF / Bot Fight Mode** 可能擋掉 LINE 的 webhook。若 §5 驗證失敗但 origin 直連正常，就在 Cloudflare 加一條 WAF 例外：
-   `Hostname eq "notify.example.com" and http.request.uri.path eq "/line/webhook"` → Skip。
+日誌可能含 LINE ID、host 及外部錯誤；不要整包貼到公開 issue。
+平台重送條件見 [LINE 官方 webhook 文件](https://developers.line.biz/en/docs/messaging-api/receiving-messages/#webhook-redelivery)。
 
-也可以先把橘雲關掉（DNS only）確認端到端通了，再開回來。
+## 6. 日常維運
 
----
+優先在後台建立憑證、設定預設對象及查看通知。Admin workflow 的 `status`、`list-clients`、
+`logs` 會把結果寫到 Actions summary；建立憑證動作則把明文 secret 寫 raw log。
+這些都需控管存取與保留期限，見 [隱私檢查](../Docs/隱私與敏感資訊檢查.md)。
 
-## 5. 驗證（**不要只信 LINE 的 Verify 綠勾**）
+更改管理帳密後可跑 `reload-admin-login`：只改 `.env` 的兩行並重啟 app，既有 session 失效。
+使用者加好友後才標記 owner；缺少 ACTIVE owner 時 `OWNER` 通知可能回 NO_RECIPIENT。
 
-### 5.1 確認流量真的到我們的 app
+## 7. 故障排除
 
-```bash
-curl -sS -o /dev/null -w "%{http_code}\n" \
-  -X POST https://notify.example.com/line/webhook \
-  -H 'Content-Type: application/json' \
-  --data-binary '{"destination":"U0","events":[]}'
-```
-
-| 結果 | 意義 |
+| 症狀 | 檢查方向 |
 |---|---|
-| **400 或 403** | ✅ 正確 —— 到我們的 app 了，被缺簽章擋下 |
-| **200 + HTML** | ✗ 還是佔位頁，nginx 沒生效 |
-| **404** | ✗ location 沒對上，或走到 `location / { return 404; }` |
-| **502 / 504** | ✗ nginx 到得了但 app 沒起來，查 `docker compose logs app` |
-
-再確認回的是 JSON 不是 HTML：
-
-```bash
-curl -sSI -X POST https://notify.example.com/line/webhook \
-  -H 'Content-Type: application/json' --data-binary '{"events":[]}' | grep -i content-type
-# 期望：application/json   （若是 text/html 就還是佔位頁）
-```
-
-### 5.2 健康檢查
-
-```bash
-curl -sS https://notify.example.com/actuator/health
-# {"groups":["liveness","readiness"],"status":"UP"}
-```
-
-### 5.3 確認不該公開的路徑真的擋住
-
-```bash
-for p in /actuator/env /actuator/configprops / /admin; do
-  printf "%-24s %s\n" "$p" "$(curl -sS -o /dev/null -w '%{http_code}' https://notify.example.com$p)"
-done
-# 全部應該是 404
-```
-
-### 5.4 用正確簽章送一個真的事件
-
-`<CHANNEL_SECRET>` 換成你的（**這行只在 server 上執行，不要貼進聊天室**）：
-
-```bash
-BODY='{"destination":"U0","events":[]}'
-printf '%s' "$BODY" > /tmp/wh.json
-SIG=$(openssl dgst -sha256 -hmac '<CHANNEL_SECRET>' -binary < /tmp/wh.json | base64)
-
-curl -sS -o /dev/null -w "%{http_code}\n" \
-  -X POST https://notify.example.com/line/webhook \
-  -H 'Content-Type: application/json' \
-  -H "x-line-signature: $SIG" \
-  --data-binary @/tmp/wh.json
-# 期望：200
-```
-
-**這一步通過才代表 Channel Secret 設對了。**
-
-> 一定要用 `--data-binary @檔案`，不要用 `--data-raw`。
-> 含多位元組字元時 shell 的 argv 轉碼會讓簽章對不上。
-
----
-
-## 6. LINE Console 設定
-
-Messaging API 分頁：
-
-| 設定 | 值 |
-|---|---|
-| Webhook URL | `https://notify.example.com/line/webhook` |
-| Use webhook | **開啟** |
-| **Auto-reply messages** | **關閉** — 否則 LINE 的罐頭回覆會蓋過我們的 |
-| Greeting messages | 關閉（我們自己發歡迎訊息） |
-
----
-
-## 7. 實機驗證
-
-| 動作 | 預期 | 怎麼查 |
-|---|---|---|
-| 手機加 Bot 好友 | 收到歡迎訊息 | `docker compose logs -f app` 應出現 `使用者加入好友` |
-| — | DB 有該筆 | `SELECT line_user_id, status FROM line_user;` |
-| 傳「我的ID」 | Bot 回你的 User ID | — |
-| 傳「說明」 | Bot 回指令清單 | — |
-| 封鎖 Bot | 狀態變 BLOCKED | `SELECT status FROM line_user;` |
-
-> **若收得到事件但收不到回覆**，且日誌出現
-> `code=401 ... Authentication failed. Confirm that the access token`，
-> 代表 `LINE_CHANNEL_TOKEN` 沒設或設錯 —— 那是**與 Channel Secret 不同的東西**，
-> 要到 Messaging API 分頁按 Issue 產生。
-
-拿到自己的 User ID 後，建立 OWNER 憑證：
-
-```bash
-docker compose -f docker/docker-compose.yml --env-file .env run --rm --no-deps app \
-  --create-client --name=owner --owner --line-user-id=<你的 User ID>
-```
-
-**secret 只會顯示這一次**，立刻存進密碼管理器。
-
----
-
-## 疑難排解
-
-| 症狀 | 原因 |
-|---|---|
-| 所有路徑回 200 HTML | nginx 設定沒載入，或有另一個 server block 先匹配到。`nginx -T \| grep -A2 notify.example.com` 確認 |
-| 502 Bad Gateway | app 沒起來，或 upstream port 與 `APP_PORT` 不一致 |
-| 直連 origin 正常、經 Cloudflare 失敗 | Cloudflare WAF / Bot Fight Mode。先關橘雲確認，再加 WAF 例外 |
-| webhook 一直 `Invalid API signature` | `LINE_CHANNEL_SECRET` 錯，或中間層改動了 body（gzip、ModSecurity） |
-| 收得到事件但回不了訊息（401） | 缺 `LINE_CHANNEL_TOKEN` |
-| 容器起不來，日誌提到 `app.crypto.keys` | `APP_SECRET_ENC_KEY` 沒設或不是 32 bytes。`openssl rand -base64 32` |
-| postgres 起不來 | PostgreSQL 18 要掛 `/var/lib/postgresql`。若曾用舊設定跑過需 `docker compose down -v` |
+| 部署排隊 | runner online、repo access、labels 與 Docker 權限 |
+| GHCR push denied | workflow permissions 與 package 權限 |
+| webhook 401／403 | Channel Secret、proxy 是否改 body、是否落到錯誤的安全鏈 |
+| 收事件卻回覆失敗 | Channel Token 與 LINE API 回應 |
+| 所有 client 認證失敗 | 加密版本是否遺失或被覆蓋；不要直接產新 key 覆蓋 |
+| 後台 404 | 帳密是否成對配置，是否重新啟動 |
+| 外部 502 | app health、loopback port 與 nginx upstream |
+| PostgreSQL volume 不相容 | 先備份、檢查版本與掛載路徑；18 掛 `/var/lib/postgresql`，不要用 `down -v` 當一般修復 |

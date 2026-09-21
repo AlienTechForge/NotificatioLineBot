@@ -1,5 +1,7 @@
 # ADR — 架構決策紀錄
 
+> 校訂日期：2026-09-21。依 2026-09-21 main 的程式碼核對；歷史方案與未實作項目另行標示。
+
 ← [回到文件索引](../README.md)
 
 記錄「當初為什麼這樣選」。設計文件說明**現在是什麼樣子**，ADR 說明**為什麼變成這樣**以及**考慮過但沒選的方案**。
@@ -12,13 +14,14 @@
 | [0002](0002-client-secret-加密儲存而非雜湊.md) | Client secret 加密儲存而非雜湊 | Accepted |
 | [0003](0003-ALL-採-multicast-而非-broadcast.md) | 全體發送採 multicast 而非 broadcast | Accepted |
 | [0004](0004-權限採-scope-集合而非固定角色.md) | 權限採 scope 集合而非固定角色 | Accepted |
-| [0005](0005-Admin-UI-單一-repo-打包進-jar.md) | Admin UI 置於同一 repo、打包進 jar | Accepted |
+| [0005](0005-Admin-UI-單一-repo-打包進-jar.md) | Admin UI 原規劃採 React/Vite 並打包進 jar | **Superseded by 0012** |
 | [0006](0006-CICD-採-self-hosted-runner.md) | CI/CD 採 self-hosted runner | Accepted |
 | [0007](0007-非同步採-DB-outbox-而非訊息中介.md) | 非同步採 DB outbox 而非訊息中介 | Accepted |
 | [0008](0008-鎖定-Spring-Boot-4.1-並覆寫-Jackson-2-版本.md) | 鎖定 Spring Boot 4.1 並覆寫 Jackson 2 版本 | Accepted |
 | [0009](0009-Admin-認證採-LINE-Login.md) | Admin 認證採 LINE Login | **Superseded by 0011** |
 | [0010](0010-CICD-改採-GHCR-加-SSH-部署.md) | image 走 GHCR，部署仍由 self-hosted runner 執行（含一次判斷失誤的修正紀錄） | Accepted |
 | [0011](0011-管理介面採帳密登入.md) | 管理介面採帳密登入，帳密來源為 GitHub Secrets | Accepted |
+| [0012](0012-Admin-UI-採原生靜態資源.md) | Admin UI 採原生靜態資源並由 Spring Boot 直接服務 | Accepted |
 
 ## 格式
 

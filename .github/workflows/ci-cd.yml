@@ -286,5 +286,5 @@ jobs:
             echo "| Image | \`$IMAGE_REF\` |"
             echo "| 部署路徑 | \`$DEPLOY_PATH\` |"
             echo "| 本機健康檢查 | \`http://127.0.0.1:$APP_PORT/actuator/health\` |"
-            echo "| 對外 | https://notify.example.com/actuator/health |"
+            echo "| 對外 | 依 APP_PUBLIC_BASE_URL 設定 |"
           } >> "$GITHUB_STEP_SUMMARY"

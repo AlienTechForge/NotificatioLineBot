@@ -1,10 +1,12 @@
 # 06 — LINE 整合設計
 
+> 校訂日期：2026-09-21。依 2026-09-21 main 的程式碼核對；歷史方案與未實作項目另行標示。
+
 ← [文件索引](README.md) ｜ 前一份 [05-API契約](05-API契約.md)
 
 本文件是 **LINE 平台限制的權威來源**。其他文件引用此處數字，不重述。
 
-> 平台限制查證日期：**2026-08-18**，來源為 [LINE Messaging API reference](https://developers.line.biz/en/reference/messaging-api/) 官方文件。這類數字會變動，重大改版時需重新查證。
+> 平台限制查證日期：**2026-09-21**，來源為 [LINE Messaging API reference](https://developers.line.biz/en/reference/messaging-api/) 官方文件。這類數字會變動，重大改版時需重新查證。
 
 ---
 
@@ -28,7 +30,7 @@
 | 文字訊息長度 | **5,000 字元** |
 | Reply token | **只能用一次**，且需在收到 webhook 後 **1 分鐘內** 使用 |
 | 冪等機制 | `X-Line-Retry-Key` header，UUID 十六進位格式，**由開發者自行產生**（LINE 不會給） |
-| 速率限制演算法 | token bucket。超過回 `429 Too Many Requests` |
+| 速率限制 | 以官方端點限制為準；超過回 `429 Too Many Requests`。本服務自有 token bucket，不假設 LINE 內部演算法 |
 | 速率限制範圍 | **per-channel**，與 IP 無關；不同 channel 各自獨立計算 |
 | Webhook 簽章 | `x-line-signature` = `Base64(HMAC-SHA256(channelSecret, rawBody))` |
 | Webhook header 大小寫 | **不敏感**——`X-Line-Signature` 與 `x-line-signature` 都可能出現，處理時不可區分大小寫 |
@@ -57,7 +59,7 @@ LINE 會送出 `events` 為空陣列的 POST 來確認連線。**必須也回 20
 
 #### (c) Webhook 失敗會**重送同一事件**
 
-回應非 200 或逾時，LINE 會重送。重送的 webhook 帶**相同的 `webhookEventId`**。
+需先在 LINE Developers Console 啟用 Webhook redelivery（預設關閉）。未回 2xx 時 LINE 可重送，次數與間隔不公開，也不保證必定送達。重送帶**相同的 `webhookEventId`**。見 [官方重送條件](https://developers.line.biz/en/docs/messaging-api/receiving-messages/#webhook-redelivery)。
 
 不做去重的話：`FollowEvent` 重送 → 重複發歡迎訊息；「申請金鑰」重送 → 發出兩個 token。處理方式見 §3.1。
 
@@ -112,19 +114,19 @@ handler 進入
 | `MessageEvent`（其他） | 貼圖、圖片等 | 記 log，reply 一則「我看不懂，傳『說明』看可用指令」 |
 | 其他所有事件 | — | 記 log 後忽略 |
 
-**`UnfollowEvent` 為什麼要連帶停用 client**：使用者封鎖了 Bot，代表不想再收到通知。但他的 client 金鑰仍然有效，還能繼續打 API（只是訊息送不到）。停用它讓狀態一致，也避免無效的 API 呼叫消耗配額。使用者重新加好友時，`FollowEvent` 不會自動恢復 client——需重新申請金鑰。這是刻意的，因為封鎖期間金鑰可能已外流。
+**`UnfollowEvent` 為什麼要連帶停用 client**：使用者封鎖了 Bot，代表不想再收到通知。但他的 client 金鑰仍然有效，還能繼續打 API（只是訊息送不到）。停用它讓狀態一致，也避免無效的 API 呼叫消耗配額。使用者重新加好友時，`FollowEvent` 不會自動恢復 client——目前需由管理者重新建立金鑰。這是刻意的，因為封鎖期間金鑰可能已外流。
 
 ### 3.3 文字指令路由
 
 | 指令 | 動作 |
 |---|---|
-| `申請金鑰` | 發放 enrollment token 並回覆一次性連結（見 [03 §5](03-權限與認證設計.md#5-金鑰發放自助申請與一次性連結)） |
-| `重設金鑰` | 撤銷現有金鑰後發放新的一次性連結 |
+| `申請金鑰` / `申請` / `issue` | 已有 ACTIVE client 時提示重設；否則回覆 T6 即將開放，尚不發連結 |
+| `重設金鑰` / `重置金鑰` / `reset` | 檢查好友狀態並回覆 T6 即將開放，尚不撤銷或發連結 |
 | `我的ID` | 回覆自己的 LINE User ID（管理者要標記 owner 時需要） |
 | `說明` / `help` | 回覆可用指令清單 |
 | 其他 | 回覆「傳『說明』看可用指令」 |
 
-指令比對前先 `trim()` 並移除全形空白。同時接受繁體中文與英文別名（`申請金鑰` / `issue`）。
+指令比對前把全形空白換成一般空白，再 `trim()` 並轉小寫。同時接受繁體中文與英文別名（`申請金鑰` / `issue`）。
 
 ### 3.4 ⚠️ Handler 的三條硬規則
 
@@ -169,12 +171,12 @@ Handler 內**不做慢動作**：
 ### 每日校正排程
 
 ```text
-每日 03:00
+每日 03:00（JVM／排程器時區，未另外指定 Asia/Taipei）
   → 取出所有 status = ACTIVE 的 user
   → 逐一呼叫 GET /v2/bot/profile/{userId}（速率限制 2,000 req/s，實務上不會撞到）
       200 → 更新 display_name / picture_url / profile_synced_at
       404 → 標記 status = BLOCKED（該使用者已封鎖或刪除帳號）
-      429 → 退避後重試
+      429 → 記錄警告、維持狀態，等待後續同步；目前沒有當輪退避重試
       其他 → 記 log，不改變狀態（避免因暫時性錯誤誤刪名單）
 ```
 
@@ -208,7 +210,7 @@ Handler 內**不做慢動作**：
 LINE 提供的冪等機制。用途：網路逾時時我們不知道請求到底送出去沒有，重試若不帶 retry key，使用者可能收到兩則相同訊息。
 
 - 每批在**建立 delivery 記錄時**就產生並存入 `retry_key` 欄位
-- 所有重試都用同一把
+- 所有重試都用同一把；LINE retry key 有效期 24 小時，不能保證跨此期間重試仍去重
 - 不同批用不同把（它們是不同的訊息）
 
 ### 5.4 錯誤分類
@@ -218,33 +220,21 @@ LINE 提供的冪等機制。用途：網路逾時時我們不知道請求到底
 | 類別 | HTTP / 訊息 | 處理 | 計入斷路器 |
 |---|---|---|---|
 | **終局失敗** | `429` + "You have reached your monthly limit."<br>`400` 訊息格式錯誤 | 不重試，標 `FAILED` | ✘ |
-| **憑證問題** | `401` / `403` | 不重試，標 `FAILED`，**發告警**（token 可能失效或被撤銷） | ✘ |
+| **憑證問題** | `401` / `403` | 不重試，標 `FAILED` 並記錄錯誤；獨立告警尚未實作 | ✘ |
 | **暫時性** | `5xx`、連線逾時、`429` 速率限制 | 指數退避重試 | ✔ |
 
 **把終局失敗計入斷路器是錯的**——額度耗盡時斷路器會開路，但等待再久也不會恢復（要等到下個月）。反而會讓真正的暫時性故障判斷失準。
 
-### 5.5 月額度守門
+### 5.5 月額度：可查詢，發送前守門未實作
 
-`target: ALL` 發送前先檢查：
+`LineQuotaClient` 供後台 `/admin/api/line-quota` 查詢 quota／consumption；通知的
+`NotificationService.submit()` 沒有發送前的月額度阻擋，也沒有 5 分鐘快取的 QuotaGuard。
+`LINE_MONTHLY_QUOTA_EXCEEDED` 是保留 API 錯誤碼，目前沒有產生它的呼叫路徑。
 
-```text
-GET /v2/bot/message/quota              → 本月可用上限
-GET /v2/bot/message/quota/consumption  → 本月已用量
-剩餘 = 上限 - 已用
+实际派送收到 LINE monthly-limit 429 時，`LineErrorClassifier` 分類為 `LINE_MONTHLY_QUOTA`，
+該批終局失敗、不再重試。呼叫端自己的滾動 24 小時收件人配額是另一套已實作限制。
 
-若 剩餘 < 本次收件人數
-   → 429 LINE_MONTHLY_QUOTA_EXCEEDED，整筆拒絕
-```
-
-**整筆拒絕，不做半套發送。** 「1200 人只送到 800 人，剩下的永遠不會送」比「完全沒送，你知道要處理」更糟。
-
-實作要點：
-
-- 額度查詢結果**快取 5 分鐘**——每次發送都查會浪費 API 呼叫，且額度不會在幾分鐘內劇烈變化
-- 只對 `ALL` 做這個檢查。`SELF`（1 人）、`OWNER`（少數人）不值得為此多一次 API 呼叫
-- 額度查詢本身失敗時**放行**並記 warn——不能因為輔助性檢查失敗就擋掉主要功能
-
-> 註：LINE 官方 FAQ 指出，有時仍有可用額度卻收到 monthly limit 錯誤。所以守門是「盡力而為」，實際發送時仍要處理 `429` 終局失敗。
+若未來新增月額度守門，仍須考慮併發發送與額度回報延遲，不能承諾全體實際送達。
 
 ---
 
@@ -265,7 +255,7 @@ GET /v2/bot/message/quota/consumption  → 本月已用量
 
 `title` 存在時作為首行，與 `text` 以換行分隔。**不使用任何 Markdown 或 HTML**——LINE 文字訊息不支援格式化，加了只會顯示成字面符號。
 
-合併後長度必須 ≤ 5000 字元，在 DTO 驗證層擋掉。
+DTO 檢查各欄位上限；`MessageAssembler` 再檢查 `title + "\n" + text` 合併後 ≤ 5000。
 
 ### 6.2 原始模式（`notify:raw`）
 
@@ -292,7 +282,7 @@ GET /v2/bot/message/quota/consumption  → 本月已用量
 | `dev`（本機／測試機） | 專用的測試 Channel | 只有開發者自己是好友 |
 | `prod` | 正式 Channel | — |
 
-Phase 2 的 Admin LINE Login 也需要各環境獨立的 Login channel。
+管理後台現採帳密登入（ADR-0011），不需要 LINE Login channel；監控站台的 Cognito 登入是另一個功能。
 
 ---
 

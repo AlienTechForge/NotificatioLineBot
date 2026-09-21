@@ -28,7 +28,7 @@ class UriHostValidatorTest {
         return new UriHostValidator(new AppProperties("https://x", "", csv));
     }
 
-    private static final UriHostValidator VALIDATOR = withHosts("example.com, example.com");
+    private static final UriHostValidator VALIDATOR = withHosts("example.com, example.org");
 
     private static List<Map<String, Object>> msg(Object... kv) {
         java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
@@ -279,17 +279,17 @@ class UriHostValidatorTest {
     @Test
     @DisplayName("設定值前後有空白也能正確比對")
     void allowListWhitespace_isTrimmed() {
-        UriHostValidator v = withHosts("  example.com ,  example.com  ");
+        UriHostValidator v = withHosts("  example.com ,  example.org  ");
 
-        assertThatCode(() -> v.validate(msg("uri", "https://example.com/x")))
+        assertThatCode(() -> v.validate(msg("uri", "https://example.org/x")))
                 .doesNotThrowAnyException();
     }
 
     @Test
     @DisplayName("AppProperties 的白名單解析：轉小寫、去空白、忽略空項")
     void appProperties_parsesAllowList() {
-        assertThat(new AppProperties("", "", "Example.COM, , example.com ,").allowedUriHostList())
-                .containsExactly("example.com", "example.com");
+        assertThat(new AppProperties("", "", "Example.COM, , example.org ,").allowedUriHostList())
+                .containsExactly("example.com", "example.org");
         assertThat(new AppProperties("", "", "").allowedUriHostList()).isEmpty();
         assertThat(new AppProperties("", "", null).allowedUriHostList()).isEmpty();
     }

@@ -47,7 +47,7 @@ class SiteLoginServiceTest {
     private static final Long LOGIN_ID = 7L;
 
     private static final CognitoEndpoint ENDPOINT =
-            new CognitoEndpoint("eu-west-2", "eu-west-2_FhQHPoX2z", "1h3khfsa958g8qa0gge2dnqvka");
+            new CognitoEndpoint("eu-west-2", "eu-west-2_Example123", "exampleclientid1234567890");
 
     @Mock
     private MonitorLoginStore store;

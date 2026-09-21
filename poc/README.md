@@ -1,142 +1,76 @@
-# POC — T1 ~ T5 端到端演示
+# POC 與本機驗證
 
-## 快速執行
+> 校訂日期：2026-09-21；依 `poc.sh`、`notify.sh`、`notify.ps1` 與 Compose 核對。
+
+## 1. 範圍
+
+`poc/poc.sh` 是 T1～T5 的歷史端到端腳本：檢查 Docker／DB、Bootstrap、HMAC、速率限制
+及合成 webhook。**不涵蓋**已實作的通知派送、指定時間通知、管理後台或 API 監控。
+
+腳本仍有 V1 時代的固定斷言：migration 數預期 1、public 表數預期 10；
+目前是 7 個 migration、15 張應用表加 Flyway 歷史表共 16 張，所以這兩项會失敗。
+不要把該腳本全綠當成本版驗收條件，完整自動化驗證用 Maven verify。
+
+## 2. 優先執行自動化測試
 
 ```bash
-cp .env.example .env      # 首次才需要，填法見下方
+mvn -B -ntp -f server/pom.xml test
+mvn -B -ntp -f server/pom.xml verify
+```
+
+verify 需可用 Docker，Testcontainers 啟動隔離 PostgreSQL，外部服務使用 stub／fake。
+不需要正式 LINE、Cognito 或 client 憑證，也不應載入正式 `.env`。
+
+## 3. 如需執行歷史 POC
+
+先閱讀 `poc/poc.sh`：它會建／撤銷測試 client、寫 LINE 使用者及 webhook 資料，
+並可能取消或移除腳本建立的資料。僅限可丟棄的獨立開發資料庫。
+
+```bash
+cp .env.example .env
+# 填入隔離開發設定，勿覆蓋既有正式 .env
 bash poc/poc.sh
 ```
 
-腳本會自己起 Docker、建憑證、跑完所有檢查，最後印出通過／失敗統計。
+腳本需要 Bash、Docker Compose、openssl、curl、一般 Unix 工具及可用資料庫設定；UUID fallback 需要 Python。
+合成 webhook 使用本機 Channel Secret 簽章；假 LINE token 可測 handler，實際 reply／Profile
+不會成功。真實測試需專用 Official Account，避免向正式好友發送。
 
----
+## 4. 發送通知腳本
 
-## 演示了什麼
+`poc/notify.sh` 与 `poc/notify.ps1` 已可呼叫通知 API；其參數與環境變數依腳本說明使用。
+Base URL 必須由 `NOTIFY_BASE` 或腳本參數提供；`https://notify.example.com` 只是範例，腳本沒有正式服務預設值。
+憑證從環境變數或秘密管理器注入，不要寫回腳本。
 
-| # | 主題 | 驗證內容 |
-|---|---|---|
-| 1 | **基礎設施** | Docker 起得來、Flyway 套用 9 張表、liveness/readiness 分離 |
-| 2 | **Bootstrap CLI** | 不經過 API 建立第一組憑證（雞生蛋問題的解法）；DB 內是密文；owner 自動標記 |
-| 3 | **HMAC 認證（正向）** | 簽章正確 → 200，`whoami` 回傳自己的 clientId／綁定使用者／scope |
-| 4 | **HMAC 認證（負向）** | 錯誤 secret、nonce 重放、時鐘偏移、缺 header 全部 401，錯誤碼正確 |
-| 5 | **速率限制** | per-client 限額，超限 429 + `Retry-After` |
-| 6 | **LINE Webhook** | 空事件回 200、錯誤簽章被擋、follow 建立使用者、**重送去重**、unfollow 連鎖停用金鑰 |
+呼叫前依 [AI 接入指南](../Docs/AI-接入指南.md) §3.4 先驗離線簽章向量，
+再 GET whoami。通知取得 202 後用 notificationId 查狀態；SUCCEEDED 只表示 LINE 接受請求。
+若要重試 POST，沿用同一個 Idempotency-Key 與相同 body bytes，每次重新產生 nonce／timestamp／signature。
 
-### 不需要真實 LINE 憑證
-
-Webhook 的部分用本地的 `LINE_CHANNEL_SECRET` 自己簽請求，**完整走過 SDK 的驗簽路徑** ——
-驗的是我們的處理邏輯，不是 LINE 的伺服器。
-
-真正發訊息到手機才需要真憑證，見下一節。
-
----
-
-## 接上真實 LINE（讓手機真的收到通知）
-
-### 需要準備
-
-| # | 項目 | 怎麼拿 |
-|---|---|---|
-| 1 | Channel Access Token + Channel Secret | LINE Developers Console → 建 Provider → 建 **Messaging API** channel。Secret 在 Basic settings，Token 在 Messaging API 分頁按 Issue |
-| 2 | 公開 HTTPS endpoint 指到 `:8080` | 反向代理，或開發期用 Cloudflare Tunnel |
-| 3 | 你的 LINE User ID | **不用事先準備** —— 加好友後傳「我的ID」，Bot 會回你 |
-
-> ⚠️ 務必用**另開的測試帳號**，不要用正式的。
-> dev 環境發測試訊息會直接進真實使用者的手機。
-
-### 步驟
-
-**1. 填入憑證**
+## 5. 本機服務與 port
 
 ```bash
-# .env
-LINE_CHANNEL_TOKEN=<你的 token>
-LINE_CHANNEL_SECRET=<你的 secret>
-APP_PUBLIC_BASE_URL=https://<你的公開網址>
+docker compose -f docker/docker-compose.yml --env-file .env up -d --build
+curl -fsS http://127.0.0.1:19080/actuator/health
 ```
 
-**2. 重啟**
+19080 是預設主機 port，8080 是容器內 port；若改 APP_PORT，檢查 URL 也要改。
+PostgreSQL 沒有公開主機 port。測試與正式容器／volume 不可混用。
 
-```bash
-docker compose -f docker/docker-compose.yml --env-file .env up -d
-```
+## 6. 疑難排解
 
-**3. 設定 Webhook**
-
-LINE Developers Console → Messaging API →
-Webhook URL 填 `https://<你的公開網址>/line/webhook` → 按 **Verify** → 應該通過 → 開啟 **Use webhook**
-
-同一頁把 **Auto-reply messages** 關掉，否則 LINE 的預設罐頭回覆會蓋過我們的。
-
-**4. 實機驗證**
-
-| 動作 | 預期 |
+| 症狀 | 處理 |
 |---|---|
-| 手機加 Bot 好友 | 收到歡迎訊息；`line_user` 出現該筆且 `status = ACTIVE` |
-| 傳「我的ID」 | Bot 回你的 LINE User ID |
-| 傳「說明」 | Bot 回可用指令清單 |
-| 封鎖 Bot | `line_user.status` 變 `BLOCKED`，其金鑰變 `DISABLED` |
+| POC schema 數量失敗 | 見 §1 的過時斷言；以 Flyway 與 SchemaIT 為準 |
+| Maven PKIX 錯誤 | Windows 可依本機憑證政策使用 WINDOWS-ROOT trust store；不要把 Windows 設定提交給 Linux CI |
+| PostgreSQL 掛載錯誤 | 檢查版本與 `/var/lib/postgresql` 掛載，先備份；不要直接刪 volume |
+| 401 簽章錯誤 | 確認 LF、UTF-8、路徑與同一份 body bytes，使用 `--data-binary @檔案` |
+| 401 時鐘偏移 | 校時並核對 X-Timestamp 是秒 |
+| 400 NO_RECIPIENT | 確认目標對象 ACTIVE 與 client 預設目標 |
 
-**5. 把自己設為 owner**
+尚未完成的是 enrollment、稽核及部分保留／復原功能；通知 API、派送及 CI/CD 均已存在。
 
-用步驟 4 拿到的 User ID：
+### 通知示例的限制
 
-```bash
-docker compose -f docker/docker-compose.yml --env-file .env run --rm --no-deps app \
-  --create-client --name=my-owner --owner --line-user-id=<你的 User ID>
-```
-
-記下印出的 clientId 與 secret（**只會顯示這一次**）。
-
----
-
-## 自己打 API
-
-`whoami` 是呼叫端的自我診斷端點 —— 回答「我的憑證有效嗎、我有哪些權限」。
-
-```bash
-CLIENT_ID=cli_xxxxxxxxxxxxxxxxxxxx
-SECRET=xxxxxxxx
-PATH_=/api/v1/whoami
-
-TS=$(date +%s)
-NONCE=$(uuidgen | tr 'A-Z' 'a-z')
-HASH=$(printf '' | openssl dgst -sha256 -hex | awk '{print $NF}')
-CANON=$(printf 'GET\n%s\n%s\n%s\n%s' "$PATH_" "$TS" "$NONCE" "$HASH")
-SIG=$(printf '%s' "$CANON" | openssl dgst -sha256 -hmac "$SECRET" -binary | base64)
-
-curl -sS "http://localhost:8080${PATH_}" \
-  -H "X-Client-Id: $CLIENT_ID" \
-  -H "X-Timestamp: $TS" \
-  -H "X-Nonce: $NONCE" \
-  -H "X-Signature: $SIG"
-```
-
-完整簽章規格與各語言範例見 [05-API契約](../Docs/plan/05-API契約.md)。
-
----
-
-## 還沒做的
-
-| 任務 | 內容 |
-|---|---|
-| **T6** | 自助申請金鑰的一次性連結（LINE 傳「申請金鑰」→ 收到連結 → 開啟取得憑證 → 再開回 410） |
-| **T7** | `POST /api/v1/notifications` —— 通知 API 本體 |
-| **T8** | 非同步分批派送（500 人一批、重試、斷路器） |
-| **T9** | 查詢 API、稽核、指標、資料保留清理 |
-| **T10** | CI/CD workflow |
-
-目前 `/api/v1/**` 只有 `whoami`；送出通知要等 T7。
-
----
-
-## 疑難排解
-
-| 症狀 | 原因 |
-|---|---|
-| `缺少 .env` | 從 `.env.example` 複製並填值 |
-| Maven 建置 `PKIX path building failed` | 防毒（如 Avast）MITM TLS。用 `MAVEN_OPTS="-Djavax.net.ssl.trustStoreType=WINDOWS-ROOT"` |
-| postgres 容器啟動失敗 | PostgreSQL 18 要掛 `/var/lib/postgresql`（不是 `.../data`）。若曾用舊設定跑過，需 `docker compose down -v` 清掉舊 volume |
-| LINE Console「Verify」失敗 | 檢查公開網址是否真的通到 `:8080`；`curl -X POST <url>/line/webhook -d '{"events":[]}'` 應回 4xx（缺簽章）而非 404 |
-| 所有請求 `401 AUTH_INVALID_SIGNATURE` | 最常見是**簽章的 bytes 與送出的 bytes 不同**。兩個典型原因：(1) 序列化兩次（簽章時一次、送出時 HTTP 函式庫又一次，空白處理不同）；(2) **Windows 的 Git Bash 下用 `curl --data-raw` 傳含中文的 body** —— 多位元組 UTF-8 經過 argv 會被轉碼，curl 實際送出的 bytes 和 `printf` 給 openssl 的不一樣。改用 `--data-binary @檔案` |
-| 所有請求 `401 AUTH_TIMESTAMP_SKEW` | 時鐘偏移。比對回應的 `Date` header |
+既有腳本每次執行產生新的 Idempotency-Key，重跑整支腳本不等於安全重試。
+Bash 範例手工拼 JSON，不支援引號、反斜線與控制字元；一般內容請先以 JSON serializer 固定 bytes。
+兩支腳本都沒有組裝 USER 所需的 userIds，不能只將 Target 設成 USER 就送給特定人。

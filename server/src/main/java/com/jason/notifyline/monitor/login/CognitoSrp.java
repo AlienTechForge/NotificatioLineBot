@@ -45,7 +45,7 @@ import java.util.Locale;
  *   <li><strong>{@code username} 必須是 {@code USER_ID_FOR_SRP}</strong>（Cognito 內部
  *       id），不是登入用的 email。</li>
  *   <li><strong>{@code poolName} 是去掉 region 前綴的部分</strong>：
- *       {@code eu-west-2_FhQHPoX2z} → {@code FhQHPoX2z}。整串丟進去簽章一定對不上。</li>
+ *       {@code eu-west-2_Example123} → {@code Example123}。整串丟進去簽章一定對不上。</li>
  *   <li><strong>timestamp 格式固定</strong>：{@code EEE MMM d HH:mm:ss 'UTC' yyyy}、
  *       {@code Locale.US}、UTC 時區、<strong>日期不補零</strong>。用系統預設 locale
  *       會在非英文環境產生 "週二"，簽章直接失敗。</li>
@@ -227,7 +227,7 @@ public final class CognitoSrp {
         return TIMESTAMP_FORMAT.format(now);
     }
 
-    /** {@code eu-west-2_FhQHPoX2z} → {@code FhQHPoX2z}，見類別註解坑 2。 */
+    /** {@code eu-west-2_Example123} → {@code Example123}，見類別註解坑 2。 */
     public static String poolNameOf(String userPoolId) {
         int underscore = userPoolId.indexOf('_');
         if (underscore < 0 || underscore == userPoolId.length() - 1) {
