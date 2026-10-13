@@ -282,14 +282,18 @@ JPA 慣例照既有：JSONB 用 `@JdbcTypeCode(SqlTypes.JSON)` + `String` 欄位
 8. **Content-Type 必須是 JSON**：取第一個 `Content-Type`、切 `;` 取 media type、trim、
    轉小寫後必須等於 `application/json` 或以 `+json` 結尾（如 `application/vnd.api+json`），
    否則 `NON_JSON_CONTENT_TYPE`。
+9. **gzip**：固定送 `Accept-Encoding: gzip`（覆蓋使用者 header 裡的同名值）。回應
+   `Content-Encoding` 為 `gzip`／`x-gzip` 時先解壓再讀，第 7 項的上限算**解壓後**位元組數；
+   無或 `identity` 照原樣讀；其他編碼（如 `br`）→ `UNSUPPORTED_CONTENT_ENCODING`。
+   gzip 內容損毀視為 `NETWORK_ERROR`。
 
 失敗一律轉成 `FetchResult.Failure(reason, detail, httpStatus, setCookieHeaders)`，
-`Reason` 共七個：`BLOCKED_URL`（保留給呼叫端正規化，`ApiFetcher` 自己不產生）、
+`Reason` 共八個：`BLOCKED_URL`（保留給呼叫端正規化，`ApiFetcher` 自己不產生）、
 `REDIRECT_NOT_ALLOWED`、`TIMEOUT`、`BODY_TOO_LARGE`、`NON_JSON_CONTENT_TYPE`、
-`HTTP_ERROR`、`NETWORK_ERROR`。`detail` 一律不含回應內容全文
+`UNSUPPORTED_CONTENT_ENCODING`、`HTTP_ERROR`、`NETWORK_ERROR`。`detail` 一律不含回應內容全文
 （`NETWORK_ERROR` 只放例外類別名稱，細節僅寫 `log.debug`）。
 
-`ApiFetcher` 對 header **原樣送出、不正規化、不去重、不過濾**，解密與組裝是呼叫端的職責；
+`ApiFetcher` 對 header **原樣送出、不正規化、不去重、不過濾**（唯一例外是第 9 項的 `Accept-Encoding`），解密與組裝是呼叫端的職責；
 它也不碰 cookie —— 出站 cookie 由呼叫端事先塞進 header，回應的 `Set-Cookie`
 不論狀態碼一律先收進 `FetchResult` 交給 `SiteSessionService` 合併。
 

@@ -4,16 +4,20 @@ import com.jason.notifyline.monitor.MonitorProperties;
 import mockwebserver3.MockResponse;
 import mockwebserver3.MockWebServer;
 import mockwebserver3.RecordedRequest;
+import okio.Buffer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -309,6 +313,97 @@ class ApiFetcherTest {
 
         assertThat(failure.httpStatus()).isEqualTo(401);
         assertThat(failure.setCookieHeaders()).containsExactly("csrf=refreshed; Path=/");
+    }
+
+    // ------------------------------------------------------------ gzip
+
+    private static Buffer gzipped(String text) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(bytes)) {
+            gzip.write(text.getBytes(StandardCharsets.UTF_8));
+        }
+        return new Buffer().write(bytes.toByteArray());
+    }
+
+    @Test
+    @DisplayName("一律送 Accept-Encoding: gzip，覆蓋使用者貼上的 br 等編碼")
+    void request_alwaysAcceptsGzipOnly() throws InterruptedException {
+        SERVER.enqueue(new MockResponse.Builder()
+                .code(200)
+                .addHeader("Content-Type", "application/json")
+                .body("{}")
+                .build());
+
+        ApiFetcher.FetchRequest request = new ApiFetcher.FetchRequest(
+                URI.create(SERVER.url("/data").toString()), "GET", null,
+                Map.of("accept-encoding", "gzip, deflate, br, zstd"));
+        defaultFetcher().fetch(request);
+
+        RecordedRequest recorded = SERVER.takeRequest(1, TimeUnit.SECONDS);
+        assertThat(recorded).isNotNull();
+        assertThat(recorded.getHeaders().values("Accept-Encoding")).containsExactly("gzip");
+    }
+
+    @Test
+    @DisplayName("Content-Encoding: gzip 的回應解壓後回傳 Success")
+    void gzipResponse_isDecompressed() throws IOException {
+        SERVER.enqueue(new MockResponse.Builder()
+                .code(200)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Content-Encoding", "gzip")
+                .body(gzipped("{\"price\":12999}"))
+                .build());
+
+        FetchResult result = defaultFetcher().fetch(getRequest("/data"));
+
+        assertThat(result).isInstanceOf(FetchResult.Success.class);
+        assertThat(((FetchResult.Success) result).body()).isEqualTo("{\"price\":12999}");
+    }
+
+    @Test
+    @DisplayName("大小上限算解壓後的位元組數：壓縮炸彈回傳 Failure(BODY_TOO_LARGE)")
+    void gzipBomb_returnsBodyTooLarge() throws IOException {
+        SERVER.enqueue(new MockResponse.Builder()
+                .code(200)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Content-Encoding", "gzip")
+                .body(gzipped("{\"data\":\"" + "x".repeat(200_000) + "\"}"))
+                .build());
+
+        ApiFetcher fetcher = new ApiFetcher(properties(Duration.ofSeconds(5), Duration.ofSeconds(5), 10_000));
+        FetchResult.Failure failure = asFailure(fetcher.fetch(getRequest("/data")));
+
+        assertThat(failure.reason()).isEqualTo(FetchResult.Reason.BODY_TOO_LARGE);
+    }
+
+    @Test
+    @DisplayName("宣稱 gzip 但內容不是 gzip 回傳 Failure(NETWORK_ERROR)")
+    void corruptGzip_returnsNetworkError() {
+        SERVER.enqueue(new MockResponse.Builder()
+                .code(200)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Content-Encoding", "gzip")
+                .body("{}")
+                .build());
+
+        FetchResult.Failure failure = asFailure(defaultFetcher().fetch(getRequest("/data")));
+
+        assertThat(failure.reason()).isEqualTo(FetchResult.Reason.NETWORK_ERROR);
+    }
+
+    @Test
+    @DisplayName("gzip 以外的 Content-Encoding 回傳 Failure(UNSUPPORTED_CONTENT_ENCODING)")
+    void unsupportedEncoding_returnsFailure() {
+        SERVER.enqueue(new MockResponse.Builder()
+                .code(200)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Content-Encoding", "br")
+                .body("{}")
+                .build());
+
+        FetchResult.Failure failure = asFailure(defaultFetcher().fetch(getRequest("/data")));
+
+        assertThat(failure.reason()).isEqualTo(FetchResult.Reason.UNSUPPORTED_CONTENT_ENCODING);
     }
 
     // ------------------------------------------------------------ 網路層錯誤

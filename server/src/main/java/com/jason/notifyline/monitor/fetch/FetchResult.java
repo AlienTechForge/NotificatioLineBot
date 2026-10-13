@@ -67,6 +67,8 @@ public sealed interface FetchResult {
         BODY_TOO_LARGE,
         /** Content-Type 不是 {@code application/json} 或 {@code +json} 結尾。 */
         NON_JSON_CONTENT_TYPE,
+        /** {@code Content-Encoding} 不是 gzip / identity（例如 br），解不開。 */
+        UNSUPPORTED_CONTENT_ENCODING,
         /** 4xx / 5xx。 */
         HTTP_ERROR,
         /** 連線被拒、連線中斷等其他 I/O 層錯誤。 */

@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.zip.GZIPInputStream;
 
 /**
  * 實際打目標 API。負責 {@code Docs/plan/11-API監控輪詢設計.md} §5.1 第 5–7 項：
@@ -42,6 +43,14 @@ import java.util.Map;
  * <p>回應大小上限用串流讀取、每讀一個 chunk 就累加位元組數來擋，超過上限立刻
  * 中止連線 —— 不是整包讀完再用 {@code body.length()} 判斷。後者對一個刻意回傳
  * 超大 body（或無限串流）的目標毫無防護效果，會把整包吃進記憶體，上限形同虛設。
+ *
+ * <h2>gzip</h2>
+ *
+ * <p>有些 API（例如 Keepa）一律回傳 gzip 壓縮內容，JDK {@code HttpClient} 不會自動解壓。
+ * 這裡固定送 {@code Accept-Encoding: gzip}（覆蓋使用者貼上的值 —— 瀏覽器複製的
+ * {@code br}/{@code zstd} 我們解不開），收到 {@code Content-Encoding: gzip} 就解壓後再讀。
+ * 大小上限算的是<strong>解壓後</strong>的位元組數，壓縮炸彈一樣會被邊讀邊擋攔下。
+ * 其他編碼一律回 {@link FetchResult.Reason#UNSUPPORTED_CONTENT_ENCODING}。
  */
 @Component
 public class ApiFetcher {
@@ -50,6 +59,8 @@ public class ApiFetcher {
 
     private static final String CONTENT_TYPE_HEADER = "Content-Type";
     private static final String SET_COOKIE_HEADER = "set-cookie";
+    private static final String ACCEPT_ENCODING_HEADER = "Accept-Encoding";
+    private static final String CONTENT_ENCODING_HEADER = "Content-Encoding";
     private static final int READ_CHUNK_SIZE = 8192;
 
     private final MonitorProperties properties;
@@ -93,7 +104,12 @@ public class ApiFetcher {
                 // 涵蓋整個請求—回應週期，拿來當「讀取逾時」的近似值。
                 .timeout(properties.readTimeout());
 
-        request.headers().forEach(builder::header);
+        request.headers().forEach((name, value) -> {
+            if (!ACCEPT_ENCODING_HEADER.equalsIgnoreCase(name)) {
+                builder.header(name, value);
+            }
+        });
+        builder.header(ACCEPT_ENCODING_HEADER, "gzip");
 
         if ("POST".equals(request.method())) {
             String body = request.body() == null ? "" : request.body();
@@ -123,9 +139,19 @@ public class ApiFetcher {
                     "content type: " + abbreviate(contentType), status, setCookieHeaders);
         }
 
+        String contentEncoding = response.headers().firstValue(CONTENT_ENCODING_HEADER)
+                .map(v -> v.strip().toLowerCase(Locale.ROOT))
+                .orElse("");
+        boolean gzip = contentEncoding.equals("gzip") || contentEncoding.equals("x-gzip");
+        if (!gzip && !contentEncoding.isEmpty() && !contentEncoding.equals("identity")) {
+            closeQuietly(response.body());
+            return failure(FetchResult.Reason.UNSUPPORTED_CONTENT_ENCODING,
+                    "content encoding: " + abbreviate(contentEncoding), status, setCookieHeaders);
+        }
+
         String body;
         try {
-            body = readBounded(response.body(), properties.maxBodyBytes());
+            body = readBounded(gzip ? gunzip(response.body()) : response.body(), properties.maxBodyBytes());
         } catch (BodyTooLargeException e) {
             return failure(FetchResult.Reason.BODY_TOO_LARGE,
                     "response exceeded " + properties.maxBodyBytes() + " byte cap", status, setCookieHeaders);
@@ -171,6 +197,16 @@ public class ApiFetcher {
                 buffer.write(chunk, 0, read);
             }
             return buffer.toString(StandardCharsets.UTF_8);
+        }
+    }
+
+    /** {@link GZIPInputStream} 建構時就會讀 header；失敗時要自己關掉原始串流。 */
+    private static InputStream gunzip(InputStream in) throws IOException {
+        try {
+            return new GZIPInputStream(in, READ_CHUNK_SIZE);
+        } catch (IOException e) {
+            closeQuietly(in);
+            throw e;
         }
     }
 
